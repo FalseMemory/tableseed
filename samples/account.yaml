@@ -1,0 +1,75 @@
+# tableseed 示例配置 —— 12 行全组合
+#
+# 字段分组（模型一）：
+#   有限取值组  g_status(2) × g_currency(2) × g_channel(3) = 12 组合
+#   每行附着组  sequence / random / const / derive —— 只填值，不放大行数
+#
+# 验收基准：docs/PRD.md 第 7 节 AC-1 ~ AC-9
+
+seed: 20260910
+
+limits:
+  max_rows: 100000
+  strategy: full
+
+tables:
+  - name: t_account
+    columns:
+      - {name: acct_no, type: string, primary_key: true}
+      - {name: status_code, type: string}
+      - {name: status_desc, type: string}
+      - {name: currency, type: string}
+      - {name: channel, type: string}
+      - {name: balance, type: int}
+      - {name: amount, type: decimal, scale: 2}
+      - {name: tenant_id, type: string}
+      - {name: branch_code, type: string}
+
+    groups:
+      # ---- 有限取值组：参与笛卡尔积 ----
+      - type: enum
+        name: g_status
+        fields: [status_code, status_desc]   # 组内两字段一次生成联合取值
+        values:
+          - ["01", "正常"]
+          - ["02", "冻结"]
+
+      - type: enum
+        name: g_currency
+        fields: [currency]
+        values:
+          - ["CNY"]
+          - ["USD"]
+
+      - type: enum
+        name: g_channel
+        fields: [channel]
+        values:
+          - ["OTC"]
+          - ["EBANK"]
+          - ["MOBILE"]
+
+      # ---- 每行附着组：不参与笛卡尔积 ----
+      - type: sequence
+        name: g_acct_no
+        fields: [acct_no]
+        start: 1
+        step: 1
+        format: "6222{seq:012d}"
+
+      - type: random
+        name: g_balance
+        fields: [balance]
+        generator: weighted_int
+        range: [0, 1000000]
+        buckets: [0.80, 0.15, 0.05]          # 普通 / 大额 / 超大额
+
+      - type: const
+        name: g_tenant
+        fields: [tenant_id, branch_code]
+        value: ["0001", "001"]               # 整批恒定
+
+      - type: derive
+        name: g_amount
+        fields: [amount]
+        expr: "balance * 0.01"

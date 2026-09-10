@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tableseed · 多表联合造数</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161a21;
+    --panel-2: #1c2129;
+    --line: rgba(255, 255, 255, 0.09);
+    --text: #e6e9ef;
+    --muted: #959dab;
+    --accent: #4c8dff;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --err: #f85149;
+    --mono: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text); font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 20px; border-bottom: 1px solid var(--line); flex: none;
+  }
+  header h1 { font-size: 15px; font-weight: 600; margin: 0; letter-spacing: .3px; }
+  header .tag { font-size: 12px; color: var(--muted); }
+  header .spacer { flex: 1; }
+  #status { font-size: 12px; color: var(--muted); }
+
+  main { flex: 1; display: flex; min-height: 0; }
+  .editor { width: 44%; min-width: 380px; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
+  .panels { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+
+  .pane-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px; border-bottom: 1px solid var(--line); flex: none;
+  }
+  .pane-head .title { font-size: 13px; font-weight: 500; }
+  .pane-head .path { font-size: 12px; color: var(--muted); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .spacer { flex: 1; }
+
+  textarea {
+    flex: 1; resize: none; border: 0; outline: 0; padding: 14px 16px;
+    background: transparent; color: var(--text); font-family: var(--mono); font-size: 13px; line-height: 1.7;
+    tab-size: 2;
+  }
+  .actions { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); flex: none; }
+
+  button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 7px; padding: 7px 14px; font-size: 13px; cursor: pointer; font-family: inherit;
+  }
+  button:hover { border-color: rgba(255,255,255,.22); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 500; }
+  button.primary:hover { filter: brightness(1.08); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+
+  .tabs { display: flex; gap: 4px; padding: 10px 16px 0; border-bottom: 1px solid var(--line); flex: none; }
+  .tabs button {
+    border: 0; background: transparent; color: var(--muted); border-radius: 7px 7px 0 0;
+    padding: 8px 14px; border-bottom: 2px solid transparent;
+  }
+  .tabs button.active { color: var(--text); border-bottom-color: var(--accent); }
+
+  .tab-body { flex: 1; overflow: auto; padding: 16px; }
+  .tab-body[hidden] { display: none; }
+
+  .empty { color: var(--muted); font-size: 13px; padding: 24px 4px; }
+  .msg { border-radius: 8px; padding: 10px 14px; font-size: 13px; margin-bottom: 12px; border: 1px solid; }
+  .msg.ok { color: var(--ok); border-color: rgba(63,185,80,.35); background: rgba(63,185,80,.08); }
+  .msg.err { color: var(--err); border-color: rgba(248,81,73,.35); background: rgba(248,81,73,.08); }
+  .msg.warn { color: var(--warn); border-color: rgba(210,153,34,.35); background: rgba(210,153,34,.08); }
+  .msg ul { margin: 6px 0 0; padding-left: 18px; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+  th, td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; white-space: nowrap; }
+  th { background: var(--panel-2); color: var(--muted); font-weight: 500; position: sticky; top: 0; }
+  tbody tr:nth-child(even) { background: rgba(255,255,255,.02); }
+  td.num { text-align: right; font-family: var(--mono); }
+
+  .stats { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 10px 16px; min-width: 108px; }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .stat .v { font-size: 20px; font-weight: 600; margin-top: 2px; }
+
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+  input[type=text] {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 7px;
+    color: var(--text); padding: 7px 12px; font-size: 13px; font-family: var(--mono); min-width: 0;
+  }
+  input.grow { flex: 1; }
+  textarea.sqlbox {
+    width: 100%; height: 110px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 10px 12px; color: var(--text); font-family: var(--mono); font-size: 13px; resize: vertical;
+  }
+  .hint { font-size: 12px; color: var(--muted); }
+  .chip { font-size: 11px; padding: 2px 8px; border-radius: 20px; border: 1px solid var(--line); color: var(--muted); }
+  .chip.on { color: var(--warn); border-color: rgba(210,153,34,.5); }
+  .bar { height: 4px; background: var(--panel-2); border-radius: 3px; overflow: hidden; margin-bottom: 12px; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+</style>
+</head>
+<body>
+<header>
+  <h1>tableseed</h1>
+  <span class="tag">多表联合造数 · 字段分组 × 表间关系</span>
+  <span class="spacer"></span>
+  <span id="status">就绪</span>
+</header>
+
+<main>
+  <section class="editor">
+    <div class="pane-head">
+      <span class="title">配置</span>
+      <span class="path" id="cfg-path">未绑定文件（仅内存）</span>
+      <span class="spacer"></span>
+      <span class="chip" id="write-chip">只读查询</span>
+    </div>
+    <textarea id="yaml" spellcheck="false"></textarea>
+    <div class="actions">
+      <button class="primary" id="btn-gen">生成数据</button>
+      <button id="btn-plan">预演</button>
+      <button id="btn-validate">校验</button>
+      <button id="btn-save">保存配置</button>
+    </div>
+  </section>
+
+  <section class="panels">
+    <nav class="tabs">
+      <button data-tab="plan" class="active">预演</button>
+      <button data-tab="result">结果预览</button>
+      <button data-tab="sql">SQL 查询台</button>
+    </nav>
+
+    <div class="tab-body" id="tab-plan">
+      <div class="empty">点击「预演」查看各表组合数与计划行数。</div>
+    </div>
+
+    <div class="tab-body" id="tab-result" hidden>
+      <div class="empty">点击「生成数据」查看结果。默认只生成不落盘。</div>
+    </div>
+
+    <div class="tab-body" id="tab-sql" hidden>
+      <div class="row">
+        <input type="text" class="grow" id="sql-dsn" placeholder="数据库连接串（留空则用配置中的 database.url）">
+      </div>
+      <textarea class="sqlbox" id="sql-text" spellcheck="false">SELECT 1</textarea>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" id="btn-sql">执行查询</button>
+        <span class="hint">默认只读：仅放行 SELECT / WITH / SHOW / EXPLAIN / DESC</span>
+      </div>
+      <div id="sql-out"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { result: null, dsn: null };
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch (e) { data = { detail: text }; }
+  if (!res.ok) {
+    const detail = data && data.detail;
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail || data));
+  }
+  return data;
+}
+
+function setStatus(text) { $("status").textContent = text; }
+
+function msg(kind, text, items) {
+  const list = items && items.length ? `<ul>${items.map((i) => `<li>${escapeHtml(i)}</li>`).join("")}</ul>` : "";
+  return `<div class="msg ${kind}">${escapeHtml(text)}${list}</div>`;
+}
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => (
+    { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]
+  ));
+}
+
+function tableHtml(columns, rows) {
+  if (!columns.length) return '<div class="empty">无字段</div>';
+  const head = columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
+  const body = rows.map((row) => {
+    const cells = columns.map((c) => {
+      const v = row[c];
+      const cls = typeof v === "number" ? ' class="num"' : "";
+      return `<td${cls}>${escapeHtml(v === null || v === undefined ? "NULL" : v)}</td>`;
+    }).join("");
+    return `<tr>${cells}</tr>`;
+  }).join("");
+  return `<table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+// ---------------------------------------------------------------- 初始化
+
+async function boot() {
+  try {
+    const cfg = await api("/api/config");
+    $("yaml").value = cfg.text;
+    $("cfg-path").textContent = cfg.path || "未绑定文件（仅内存）";
+    await validate(true);
+  } catch (e) {
+    $("tab-plan").innerHTML = msg("err", "无法连接后端：" + e.message);
+  }
+}
+
+async function validate(silent) {
+  const out = $("tab-plan");
+  try {
+    const res = await api("/api/config/validate", {
+      method: "POST",
+      body: JSON.stringify({ text: $("yaml").value }),
+    });
+    if (res.ok) {
+      if (!silent) out.innerHTML = msg("ok", "配置校验通过");
+      setStatus("校验通过");
+    } else {
+      out.innerHTML = res.error
+        ? msg("err", res.error)
+        : msg("err", `发现 ${res.problems.length} 个问题`, res.problems);
+      setStatus("配置有问题");
+    }
+  } catch (e) {
+    out.innerHTML = msg("err", e.message);
+  }
+}
+
+async function saveConfig() {
+  try {
+    const res = await api("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({ text: $("yaml").value }),
+    });
+    setStatus(res.path ? "已保存到 " + res.path : "已保存（仅内存）");
+  } catch (e) { setStatus("保存失败：" + e.message); }
+}
+
+// ---------------------------------------------------------------- 预演
+
+async function runPlan() {
+  switchTab("plan");
+  const out = $("tab-plan");
+  out.innerHTML = '<div class="empty">预演中…</div>';
+  try {
+    const plan = await api("/api/plan", {
+      method: "POST",
+      body: JSON.stringify({ text: $("yaml").value }),
+    });
+    const rows = plan.tables.map((t) => ({
+      "表": t.table,
+      "有限取值组": t.finite_groups.join(" × ") || "-",
+      "组合数": t.combo_count,
+      "计划行数": t.planned_rows,
+      "备注": t.note || "",
+    }));
+    const stats = `
+      <div class="stats">
+        <div class="stat"><div class="k">总行数</div><div class="v">${plan.total_rows}</div></div>
+        <div class="stat"><div class="k">表数量</div><div class="v">${plan.tables.length}</div></div>
+        <div class="stat"><div class="k">生成顺序</div><div class="v" style="font-size:14px">${escapeHtml(plan.order.join(" → "))}</div></div>
+      </div>`;
+    const warn = plan.warnings.length ? msg("warn", "注意", plan.warnings) : "";
+    out.innerHTML = stats + warn + tableHtml(["表", "有限取值组", "组合数", "计划行数", "备注"],
+      rows.map((r) => [r["表"], r["有限取值组"], r["组合数"], r["计划行数"], r["备注"]]));
+    setStatus("预演完成");
+  } catch (e) { out.innerHTML = msg("err", e.message); }
+}
+
+// ---------------------------------------------------------------- 生成（SSE）
+
+async function runGenerate() {
+  switchTab("result");
+  const out = $("tab-result");
+  out.innerHTML = '<div class="bar"><i id="prog"></i></div><div class="empty">生成中…</div>';
+
+  const res = await fetch("/api/generate/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: $("yaml").value, dsn: state.dsn }),
+  });
+
+  if (!res.ok || !res.body) { out.innerHTML = msg("err", "生成请求失败"); return; }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const chunks = buffer.split("\n\n");
+    buffer = chunks.pop();
+    for (const chunk of chunks) {
+      const evMatch = chunk.match(/^event:\s*(.+)$/m);
+      const dataMatch = chunk.match(/^data:\s*(.+)$/m);
+      if (!evMatch || !dataMatch) continue;
+      const event = evMatch[1].trim();
+      const data = JSON.parse(dataMatch[1]);
+
+      if (event === "progress") {
+        const pct = data.total ? Math.round((data.done / data.total) * 100) : 0;
+        const bar = $("prog");
+        if (bar) bar.style.width = pct + "%";
+        setStatus(`生成中 ${data.done}/${data.total}` + (data.table ? ` · ${data.table}` : ""));
+      } else if (event === "done") {
+        state.result = data;
+        renderResult(data);
+        setStatus(`完成 · ${data.elapsed_ms} ms · 去向：${data.sink}`);
+      } else if (event === "error") {
+        out.innerHTML = msg("err", data.message, data.problems);
+        setStatus("生成失败");
+      }
+    }
+  }
+}
+
+function renderResult(data) {
+  const out = $("tab-result");
+  const names = Object.keys(data.tables || {});
+  if (!names.length) { out.innerHTML = '<div class="empty">没有生成任何数据</div>'; return; }
+
+  const total = names.reduce((sum, n) => sum + data.tables[n].count, 0);
+  const stats = `
+    <div class="stats">
+      <div class="stat"><div class="k">总行数</div><div class="v">${total}</div></div>
+      <div class="stat"><div class="k">耗时</div><div class="v">${data.elapsed_ms}<span style="font-size:12px"> ms</span></div></div>
+      <div class="stat"><div class="k">种子</div><div class="v" style="font-size:16px">${data.seed}</div></div>
+      <div class="stat"><div class="k">去盘</div><div class="v" style="font-size:14px">${data.sink || "内存模式"}</div></div>
+    </div>`;
+
+  let html = stats;
+  for (const name of names) {
+    const t = data.tables[name];
+    html += `<div class="pane-head" style="padding:10px 0;border:0">
+      <span class="title">${escapeHtml(name)}</span>
+      <span class="chip">${t.count} 行</span>
+      ${t.truncated ? '<span class="chip on">已截断</span>' : ""}
+    </div>`;
+    html += tableHtml(t.columns, t.rows);
+    html += '<div style="height:18px"></div>';
+  }
+  out.innerHTML = html;
+}
+
+// ---------------------------------------------------------------- SQL 查询台
+
+async function runSql() {
+  const out = $("sql-out");
+  out.innerHTML = '<div class="empty">执行中…</div>';
+  try {
+    const res = await api("/api/sql/execute", {
+      method: "POST",
+      body: JSON.stringify({ sql: $("sql-text").value, dsn: $("sql-dsn").value || null }),
+    });
+    const info = `<div class="msg ok">返回 ${res.row_count} 行，耗时 ${res.elapsed_ms} ms${res.truncated ? "（已截断）" : ""}</div>`;
+    out.innerHTML = info + tableHtml(res.columns, res.rows);
+  } catch (e) {
+    out.innerHTML = msg("err", e.message);
+  }
+}
+
+// ---------------------------------------------------------------- 交互
+
+function switchTab(name) {
+  document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+  ["plan", "result", "sql"].forEach((t) => { $("tab-" + t).hidden = t !== name; });
+}
+
+document.querySelectorAll(".tabs button").forEach((b) => {
+  b.addEventListener("click", () => switchTab(b.dataset.tab));
+});
+$("btn-validate").addEventListener("click", () => validate(false));
+$("btn-plan").addEventListener("click", runPlan);
+$("btn-gen").addEventListener("click", runGenerate);
+$("btn-save").addEventListener("click", saveConfig);
+$("btn-sql").addEventListener("click", runSql);
+
+boot();
+</script>
+</body>
+</html>
