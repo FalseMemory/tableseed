@@ -127,16 +127,24 @@ tableseed 的定位是把"造数"从**写脚本**变成**写配置**：用「字
 
 ### FR-6 表间关系
 
-| 编号 | 需求 | 优先级 | 里程碑 |
-| --- | --- | :---: | :---: |
-| FR-6.1 | 关系四要素声明：`cardinality` / `existence` / `join` / `propagate` | P1 | M2 |
-| FR-6.2 | 基数支持 1:1 / 1:0..1 / 1:N / N:M | P1 | M2 |
-| FR-6.3 | 存在性支持 required / optional / conditional | P1 | M2 |
-| FR-6.4 | 锚点支持主键传播、业务键关联、复合键 | P1 | M2 |
-| FR-6.5 | 传播模式：`copy` / `derive` / `map` / `free` | P1 | M2 |
-| FR-6.6 | 1:1 关系下有限取值组改用分配策略（follow_parent 默认 / round_robin / random / weighted） | P1 | M2 |
-| FR-6.7 | 1:1 关系下行数必须等于父行数（关键约束，需专门断言） | P1 | M2 |
-| FR-6.8 | `ref` 组只能从父表已生成的行中取值，保证引用完整性 | P1 | M2 |
+| 编号 | 需求 | 优先级 | 里程碑 | 状态 |
+| --- | --- | :---: | :---: | :---: |
+| FR-6.1 | 关系四要素声明：`cardinality` / `existence` / `join` / `propagate` | P1 | M2 | ✅ |
+| FR-6.2 | 基数支持 1:1 / 1:0..1 / 1:N / N:M | P1 | M2 | ✅ 除 N:M（M4） |
+| FR-6.3 | 存在性支持 required / optional / conditional | P1 | M2 | ✅ |
+| FR-6.4 | 锚点支持主键传播、业务键关联、复合键 | P1 | M2 | ✅ join 自动补齐 copy |
+| FR-6.5 | 传播模式：`copy` / `derive` / `map` / `free` | P1 | M2 | ✅（`split` M4 / `aggregate` M3） |
+| FR-6.6 | 1:1 关系下有限取值组改用分配策略（follow_parent 默认 / round_robin / random / weighted） | P1 | M2 | ✅ |
+| FR-6.7 | 1:1 关系下行数必须等于父行数（关键约束，需专门断言） | P1 | M2 | ✅ |
+| FR-6.8 | `ref` 组只能从父表已生成的行中取值，保证引用完整性 | P1 | M2 | ✅ |
+
+**M2 补充决策**：
+
+- **D-7（新增）`follow_parent` 的确切语义** —— 按驱动字段（``drive_by``）分组：
+  驱动值首次出现时从组合池轮转取下一个（保覆盖），再次出现时复用上次组合（保一致）。
+  未显式声明 `drive_by` 时按「被 copy/map 的父字段 → join 父字段」推断。
+- **D-8（新增）被传播覆盖的字段无需归组** —— 完备划分要求的是「每个字段有且仅有一个取值来源」，
+  `propagate` 本身即来源之一，故 `check` 对这类字段豁免「未分组」报错。
 
 ### FR-7 两阶段生成
 
@@ -241,6 +249,22 @@ tableseed 的定位是把"造数"从**写脚本**变成**写配置**：用「字
 | AC-11 | 页面点击生成后，结果表格显示的 12 行与 CLI 输出完全一致 |
 | AC-12 | SQL 控制台执行 `SELECT` 返回结果并渲染表格；执行 `DELETE` / `DROP` 被拒绝并给出原因 |
 | AC-13 | 未提供数据库连接时执行生成，工作目录内无任何新增文件（NFR-8） |
+
+### 7.2 M2 端到端（samples/txn.yaml）
+
+| 编号 | 断言 |
+| --- | --- |
+| AC-14 | `t_txn` 9 行、`t_txn_detail` 9 行、`t_txn_log` 27 行（基数 1:1 / 1:N 生效） |
+| AC-15 | 每条子行的 `txn_no` 在父表中存在（join 自动 copy） |
+| AC-16 | `copy` 传播：子行 `currency` 与父行一致 |
+| AC-17 | `map` 传播：`T/D/W` 映射为 `TRANSFER/DEPOSIT/WITHDRAW` |
+| AC-18 | `derive` 传播：子行 `net_amount == parent.amount - parent.fee` |
+| AC-19 | `follow_parent` 一致性：同一 `txn_type` 的行，子表 `settle_status` 相同 |
+| AC-20 | `follow_parent` 覆盖性：3 个 `settle_status` 全部出现 |
+| AC-21 | 1:N 下每条父行都拥有完整的 3 个子表组合 |
+| AC-22 | `plan` 输出生成顺序 `t_txn → t_txn_detail → t_txn_log`，行数与实造一致 |
+| AC-23 | 关系成环时 `check` 报错并指出可疑环 |
+| AC-24 | `ref` 组取值来自父行；引用不存在字段时报错并列出可用字段 |
 
 ## 8. 里程碑
 

@@ -120,7 +120,11 @@ class JoinKey(_Model):
 
 
 class PropagateRule(_Model):
-    """父子表之间的字段传播规则。"""
+    """父子表之间的字段传播规则。
+
+    六种模式对应 README「模型二」：
+    ``copy`` / ``derive`` / ``map`` / ``split``（M4）/ ``aggregate``（M3）/ ``free``。
+    """
 
     mode: PropagateMode
     to: str
@@ -128,6 +132,12 @@ class PropagateRule(_Model):
     expr: str | None = None
     table: str | None = None
     split_ratio: list[float] | None = None
+
+    # map 模式：码值映射表（父子系统码表不一致时用），形如 {父值: 子值}
+    mapping: dict[str, Any] | None = None
+
+    # map 模式：父值未命中 mapping 时的兜底值；不提供则视为配置错误并报错
+    default: Any = None
 
 
 class RelationSpec(_Model):
@@ -140,6 +150,10 @@ class RelationSpec(_Model):
     condition: str | None = None
     join: list[JoinKey] = Field(default_factory=list)
     propagate: list[PropagateRule] = Field(default_factory=list)
+
+    # follow_parent 分配的驱动字段：父行这些字段的值相同 → 子行复用同一组合。
+    # 不填时按启发式推断：优先用被 copy / map 的父字段，其次用 join 父字段。
+    drive_by: list[str] = Field(default_factory=list)
 
 
 class LimitsSpec(_Model):

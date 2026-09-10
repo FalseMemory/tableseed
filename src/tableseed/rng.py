@@ -8,6 +8,19 @@ from __future__ import annotations
 
 import random
 import uuid as _uuid
+import zlib
+
+_HASH_BITS = 0xFFFFFFFF
+
+
+def stable_hash(key: str, seed: int = 0) -> int:
+    """跨进程稳定的字符串散列。
+
+    **绝不能**用内置 ``hash()`` —— 它对 str/bytes 受 PYTHONHASHSEED 随机化
+    影响，同一 key 在不同进程会得到不同值，直接破坏「同 seed 结果可复现」
+    （PRD NFR-2）。这里改用 zlib.crc32，任何进程、任何 Python 版本都一致。
+    """
+    return zlib.crc32(f"{seed}:{key}".encode("utf-8")) & _HASH_BITS
 
 
 class SeededRandom:
@@ -36,5 +49,8 @@ class SeededRandom:
         return str(_uuid.UUID(int=self._rng.getrandbits(128), version=4))
 
     def fork(self, key: str) -> "SeededRandom":
-        """按 key 派生子随机源，使不同表的随机序列互不干扰。"""
-        return SeededRandom(hash((self.seed, key)) & 0xFFFFFFFF)
+        """按 key 派生子随机源，使不同表的随机序列互不干扰。
+
+        使用 :func:`stable_hash` 而非内置 ``hash``，保证跨进程可复现。
+        """
+        return SeededRandom(stable_hash(key, self.seed))

@@ -191,22 +191,32 @@ relations:
 
 | 模式 | 语义 | 阶段 | 例 |
 | --- | --- | :---: | --- |
-| `copy` | 父字段原值照抄到子字段 | P1 | `currency`、`txn_date`、`acct_no` 两表一致 |
-| `derive` | 父字段经表达式/函数变换后写入子字段 | P1 | `detail_amt = parent.amount × 0.7` |
-| `map` | 父表码值经映射表转换为子表码值 | P1 | 父 `txn_type` → 子 `detail_type` |
-| `split` | 父的一个值拆分到 N 个子行，满足 Σ子 = 父 | P1 | 一笔 1000 拆成 3 笔明细，合计仍是 1000 |
-| `aggregate` | **反向**：父字段由子表汇总得出 | **P2** | 父 `detail_count` = 子表行数 |
-| `free` | 子表自由生成，仅受自身分组规则约束 | P1 | 备注、随机附言 |
+| `copy` | 父字段原值照抄到子字段 | ✅ M2 | `currency`、`txn_date`、`acct_no` 两表一致 |
+| `derive` | 父字段经表达式/函数变换后写入子字段 | ✅ M2 | `detail_amt = parent.amount × 0.7` |
+| `map` | 父表码值经映射表转换为子表码值 | ✅ M2 | 父 `txn_type` → 子 `detail_type` |
+| `split` | 父的一个值拆分到 N 个子行，满足 Σ子 = 父 | M4 | 一笔 1000 拆成 3 笔明细，合计仍是 1000 |
+| `aggregate` | **反向**：父字段由子表汇总得出 | M3 | 父 `detail_count` = 子表行数 |
+| `free` | 子表自由生成，仅受自身分组规则约束 | ✅ M2 | 备注、随机附言 |
 
 ```yaml
 propagate:
   - {mode: copy,    from: txn_date, to: txn_date}
   - {mode: copy,    from: acct_no,  to: acct_no}
   - {mode: copy,    from: currency, to: currency}
-  - {mode: derive,  to: detail_amt, expr: "src.amount * 0.7"}
-  - {mode: map,     from: txn_type, to: detail_type, table: map_txn_type}
+  - {mode: derive,  to: net_amount, expr: "parent.amount - parent.fee"}
+  - {mode: map,     from: txn_type, to: detail_type,
+     mapping: {T: TRANSFER, D: DEPOSIT, W: WITHDRAW}}
   - {mode: free,    to: remark}
 ```
+
+两条省事的设计：
+
+1. **`join` 锚点自动补齐 `copy`** —— 声明了 `{parent_field: txn_no, child_field: txn_no}`
+   就不必再写一条 copy 规则；若已显式声明该子字段的规则，则以用户的为准。
+2. **被传播覆盖的字段无需再归组** —— 分组完备性要求"每个字段有且仅有一个取值来源"，
+   `propagate` 本身就是一种来源。写了 `to: currency` 就不必再造一个占位组。
+
+另外 `ref` 组可在子表里直接引用父表字段（`- {type: ref, fields: [ref_no], from: parent.txn_no}`）。
 
 ## 2.3 1:1 关系下的覆盖分配 ⚠️
 
@@ -224,6 +234,24 @@ propagate:
 **一句话概括这个分水岭**：
 
 > 笛卡尔积是「放大行数换覆盖」，分配是「固定行数内保覆盖」。1:N 用前者，1:1 只能用后者。
+
+### `follow_parent` 的确切语义（已实现）
+
+「由父行决定」具体怎么定？规则是 —— **按驱动字段分组**：
+
+- 驱动值**首次**出现 → 从组合池里轮转取下一个（不同父值拿到不同组合，**保覆盖**）
+- 驱动值**再次**出现 → 复用上次那个组合（同父值得到同子值，**保一致**）
+
+```yaml
+relations:
+  - parent: t_txn
+    child: t_txn_detail
+    cardinality: "1:1"
+    drive_by: [txn_type]     # 同交易类型 → 同清算状态
+```
+
+驱动字段 `drive_by` 不填时的推断顺序：被 `copy`/`map` 的父字段 → `join` 的父字段。
+写在 `GroupSpec.allocation` 上（默认 `follow_parent`），以**第一个有限取值组**为准。
 
 ## 2.4 条件枚举：父约束子
 
@@ -425,10 +453,11 @@ t_account     枚举组: g_status(2) × g_currency(2) × g_channel(3) = 12 组�
 
 # Roadmap
 
-- [ ] **M1** 元数据扫描 + 分组模型 + 单表笛卡尔积展开 + 执行策略（直连/内存）+ CLI + **WebUI 最小闭环**（配置→预演→生成→预览）+ SQL 查询台
-- [ ] **M2** 表间关系：四要素 + `copy`/`derive`/`map`/`free` 传播 + 拓扑排序 + 1:1 分配策略 + WebUI 关系图
+- [x] **M1** 分组模型 + 单表笛卡尔积展开 + 执行策略（直连/内存）+ CLI + **WebUI 最小闭环**（配置→预演→生成→预览）+ SQL 查询台
+- [x] **M2** 表间关系内核：四要素 + `copy`/`derive`/`map`/`free` 传播 + 拓扑排序 + 1:1 分配策略（`follow_parent` 等四种）+ `ref` 组
+- [ ] M2 收尾：WebUI 关系图
 - [ ] **M3** `aggregate` 两阶段生成 + `invariants` 校验 + 覆盖策略（pairwise / sample）+ 覆盖度视图
-- [ ] **M4** `split` 拆分模式 + 流式生成 + 生成后自检
+- [ ] **M4** `split` 拆分模式 + 流式生成 + 生成后自检 + 多父（N:M）
 - [ ] **M5** 打磨与集成：打包分发、Python API 稳定化、与测试平台集成
 
 # 技术选型
@@ -446,7 +475,17 @@ t_account     枚举组: g_status(2) × g_currency(2) × g_channel(3) = 12 组�
 
 # 状态
 
-规格已定稿（PRD + 技术方案），代码骨架待搭建。当前仓库只有文档。
+M1（单表内核 + WebUI 闭环）与 M2（表间关系内核）已完成，**122 条测试通过**。
+
+```bash
+tableseed check -c samples/txn.yaml   # 校验：分组完备性 / 依赖环 / 字段引用
+tableseed plan  -c samples/txn.yaml   # 预演：各表组合数、行数、生成顺序
+tableseed gen   -c samples/txn.yaml   # 生成：默认只生成不落盘
+tableseed ui    -c samples/txn.yaml   # 浏览器里完成上述全部动作
+```
+
+示例：[samples/account.yaml](samples/account.yaml)（单表 12 组合）、
+[samples/txn.yaml](samples/txn.yaml)（交易 9 行 + 详情 9 行 1:1 + 日志 27 行 1:N）。
 
 ---
 

@@ -1,25 +1,39 @@
 """单表生成主流程。
 
-职责：把一张表的「骨架行（有限取值组笛卡尔积）」与「附着组（逐行现算）」
-合成完整的行集合。引擎不碰 IO —— 产出 TableData 内存对象交给 sink 处理。
+职责：把一张表的「骨架行（有限取值组笛卡尔积 或 分配得到的组合）」与
+「附着组（逐行现算）」合成完整的行集合，再套用父表的传播规则。
+引擎不碰 IO —— 产出 TableData 内存对象交给 sink 处理。
+
+两种生成形态
+------------
+:func:`generate_table`
+    独立表（无父表）：有限取值组做**完整笛卡尔积**，行数 = 组合数。
+
+:func:`generate_child`
+    子表：按关系基数为**每条父行**生成子行 ——
+    1:1 / 1:0..1 用 :class:`ComboAllocator` 分配（固定行数内保覆盖），
+    1:N 用笛卡尔积放大（放大行数换覆盖）。
 """
 
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, Iterator
 
 from ..errors import GenerateError
 from ..expr import Expression, build_functions
 from ..models import (
     GeneratedRow,
     GroupSpec,
+    RelationSpec,
     SeedConfig,
     TableData,
     TableSpec,
 )
 from ..rng import SeededRandom
+from .allocator import ComboAllocator, drive_fields_of
 from .group_expander import attach_groups, combo_count, expand_skeleton, finite_groups
+from .propagator import apply_propagate, build_env, effective_rules
 
 _DATE_FORMATS = ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d", "%Y-%m-%d %H:%M:%S")
 
@@ -30,7 +44,7 @@ def generate_table(
     rng: SeededRandom,
     limit: int | None = None,
 ) -> TableData:
-    """生成一张表的全部数据。"""
+    """生成一张独立表（无父表）的全部数据 —— 完整笛卡尔积。"""
     funcs = build_functions(rng)
     finite = finite_groups(table)
     attaches = attach_groups(table)
@@ -43,33 +57,166 @@ def generate_table(
         )
 
     max_rows = _resolve_max_rows(config, table, limit)
-    excludes = [
-        Expression(src, funcs, f"limits.exclude[{i}]")
-        for i, src in enumerate(config.limits.exclude)
-    ]
+    excludes = _compile_excludes(config, funcs)
 
     rows: list[GeneratedRow] = []
     truncated = False
 
     for skeleton in expand_skeleton(finite):
-        values: dict[str, Any] = dict(skeleton)
-        seq = len(rows)  # 行序号按**产出**行递增，保证 sequence 组连续编号
+        seq = len(rows)
+        values = _build_row(skeleton, attaches, seq, funcs, rng, parent_values=None)
 
-        for group in attaches:
-            _apply_group(group, values, seq, funcs, rng)
-
-        env = dict(values)
-        env["seq"] = seq
-        env["row"] = values
-
+        env = build_env(values, {}, seq)
         if any(expr(env) for expr in excludes):
             continue
 
         rows.append(GeneratedRow(table=table.name, seq=seq, values=values))
         if len(rows) >= max_rows:
-            truncated = total_combos > max_rows or len(rows) < total_combos
+            truncated = total_combos > max_rows
             break
 
+    return _finish(table, rows, truncated)
+
+
+def generate_child(
+    config: SeedConfig,
+    table: TableSpec,
+    relation: RelationSpec,
+    parent_data: TableData,
+    rng: SeededRandom,
+    limit: int | None = None,
+) -> TableData:
+    """为父表的每一行生成子表数据。
+
+    - ``1:1`` / ``1:0..1``：每条父行至多一条子行，有限组改用**分配**策略
+    - ``1:N``：每条父行展开子表的**完整笛卡尔积**（per_parent 作用域）
+    """
+    if relation.cardinality == "N:M":
+        raise GenerateError(
+            f"N:M 关系（{relation.parent} → {relation.child}）计划在 M4 支持",
+            f"relations[{relation.parent}→{relation.child}]",
+        )
+
+    funcs = build_functions(rng)
+    finite = finite_groups(table)
+    attaches = attach_groups(table)
+    rules = effective_rules(relation)
+
+    allocation = _allocation_of(finite)
+    allocator = ComboAllocator(
+        finite,
+        strategy=allocation,
+        rng=rng,
+        drive_fields=drive_fields_of(relation, rules),
+        path=f"tables[{table.name}]",
+    )
+    per_parent_combos = combo_count(finite)
+
+    max_rows = _resolve_max_rows(config, table, limit)
+    excludes = _compile_excludes(config, funcs)
+
+    rows: list[GeneratedRow] = []
+    truncated = False
+    theoretical = len(parent_data) * (
+        1 if _is_one_to_one(relation) else max(per_parent_combos, 1)
+    )
+
+    for parent_row in parent_data.rows:
+        if not _should_exist(relation, parent_row, funcs):
+            continue
+
+        skeletons: Iterator[dict[str, Any]]
+        if _is_one_to_one(relation):
+            # 1:1 —— 分配一个组合，行数不放大
+            skeletons = iter([allocator.assign(parent_row.values, len(rows))])
+        else:
+            # 1:N —— 笛卡尔积放大，覆盖换行数
+            skeletons = expand_skeleton(finite) if finite else iter([{}])
+
+        for skeleton in skeletons:
+            seq = len(rows)
+            values = _build_row(
+                skeleton, attaches, seq, funcs, rng, parent_row.values
+            )
+
+            apply_propagate(
+                rules, values, parent_row.values, funcs, f"tables[{table.name}]", seq
+            )
+
+            env = build_env(values, parent_row.values, seq)
+            if any(expr(env) for expr in excludes):
+                continue
+
+            rows.append(
+                GeneratedRow(
+                    table=table.name, seq=seq, values=values, parent_seq=parent_row.seq
+                )
+            )
+            if len(rows) >= max_rows:
+                truncated = theoretical > max_rows
+                break
+        if truncated:
+            break
+
+    return _finish(table, rows, truncated)
+
+
+# ---------------------------------------------------------------- 内部实现
+
+
+def _is_one_to_one(relation: RelationSpec) -> bool:
+    return relation.cardinality in {"1:1", "1:0..1"}
+
+
+def _allocation_of(finite: list[GroupSpec]) -> str:
+    """分配策略以**第一个有限取值组**为准（它是驱动组）。"""
+    return finite[0].allocation if finite else "follow_parent"
+
+
+def _compile_excludes(config: SeedConfig, funcs: dict) -> list[Expression]:
+    return [
+        Expression(src, funcs, f"limits.exclude[{i}]")
+        for i, src in enumerate(config.limits.exclude)
+    ]
+
+
+def _should_exist(relation: RelationSpec, parent_row: GeneratedRow, funcs: dict) -> bool:
+    """按存在性判定父行是否需要子行。"""
+    if relation.existence == "required":
+        return True
+    if not relation.condition:
+        return True  # optional 但无 condition —— 等同 required，checker 会提示
+    expression = Expression(
+        relation.condition, funcs, f"relations[{relation.parent}→{relation.child}].condition"
+    )
+    env: dict[str, Any] = dict(parent_row.values)
+    env["parent"] = parent_row.values
+    env["row"] = parent_row.values
+    return bool(expression(env))
+
+
+def _build_row(
+    skeleton: dict[str, Any],
+    attaches: list[GroupSpec],
+    seq: int,
+    funcs: dict,
+    rng: SeededRandom,
+    parent_values: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """合成一行：骨架 + 附着组。
+
+    组带 ``when`` 条件且不满足时，该组字段不会被写入（保持骨架值或缺失）。
+    """
+    values: dict[str, Any] = dict(skeleton)
+    parent_values = parent_values or {}
+
+    for group in attaches:
+        _apply_group(group, values, seq, funcs, rng, parent_values)
+
+    return values
+
+
+def _finish(table: TableSpec, rows: list[GeneratedRow], truncated: bool) -> TableData:
     data = TableData(
         table=table.name,
         columns=_resolve_columns(table),
@@ -77,9 +224,6 @@ def generate_table(
     )
     data.truncated = truncated  # type: ignore[attr-defined]
     return data
-
-
-# ---------------------------------------------------------------- 内部实现
 
 
 def _resolve_max_rows(config: SeedConfig, table: TableSpec, limit: int | None) -> int:
@@ -109,11 +253,11 @@ def _apply_group(
     seq: int,
     funcs: dict,
     rng: SeededRandom,
+    parent_values: dict[str, Any] | None = None,
 ) -> None:
     """把一个附着组的值写入当前行。"""
-    env_main = dict(values)
-    env_main["seq"] = seq
-    env_main["row"] = values
+    parent_values = parent_values or {}
+    env_main = build_env(values, parent_values, seq)
 
     if group.when:
         condition = Expression(group.when, funcs, f"group[{group.name}].when")
@@ -143,7 +287,7 @@ def _apply_group(
         if not group.expr:
             raise GenerateError(f"derive 组 {group.name} 缺少 expr", f"group[{group.name}]")
         expression = Expression(group.expr, funcs, f"group[{group.name}].expr")
-        result = expression(env_main)
+        result = expression(build_env(values, parent_values, seq))
         if len(group.fields) == 1:
             values[group.fields[0]] = result
         elif isinstance(result, (list, tuple)) and len(result) == len(group.fields):
@@ -157,15 +301,36 @@ def _apply_group(
         return
 
     if group.type == "ref":
-        raise GenerateError(
-            f"ref 组 {group.name} 需要父表上下文，将在 M2 支持",
-            f"group[{group.name}]",
-        )
+        _assign(group, values, [_ref_value(group, parent_values) for _ in group.fields])
+        return
 
     if group.type == "aggregate":
-        return  # Phase 2 回填
+        return  # Phase 2 回填（M3）
 
     raise GenerateError(f"未知组类型: {group.type}", f"group[{group.name}]")
+
+
+def _ref_value(group: GroupSpec, parent_values: dict[str, Any]) -> Any:
+    """ref 组：引用父表字段。
+
+    ``from`` 支持三种写法：
+    ``parent.acct_no`` / ``t_account.acct_no`` / ``acct_no``。
+    M2 只支持引用直接父表，跨级引用留待后续版本。
+    """
+    if not group.from_:
+        raise GenerateError(f"ref 组 {group.name} 缺少 from", f"group[{group.name}]")
+
+    raw = group.from_
+    field = raw.split(".")[-1]
+
+    if field not in parent_values:
+        raise GenerateError(
+            f"ref 组 {group.name} 引用了父表字段 {field!r}，但父行中不存在"
+            f"（可用字段: {', '.join(sorted(parent_values)) or '无'}）"
+            "。M2 只支持引用直接父表字段。",
+            f"group[{group.name}]",
+        )
+    return parent_values[field]
 
 
 def _assign(group: GroupSpec, values: dict[str, Any], payload: list[Any]) -> None:
@@ -202,7 +367,7 @@ def _random_value(group: GroupSpec, rng: SeededRandom) -> Any:
 
     if generator == "date":
         if not low_high:
-            raise GenerateError(f"random date 组 {group.name} 缺少 range", f"group[{group.name}]")
+            raise GenerateError(f"random 组 {group.name} 缺少 range", f"group[{group.name}]")
         start, end = _parse_date(low_high[0]), _parse_date(low_high[1])
         span = (end - start).days
         return (start + timedelta(days=rng.rand_int(0, max(span, 0)))).isoformat()

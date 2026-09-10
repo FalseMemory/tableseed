@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from .config import check_config, load_config, load_config_from_text
-from .engine import generate_table
+from .engine import generate_all
 from .models import GenerateResult, PlanResult, SeedConfig
 from .plan import plan_tables
 from .rng import SeededRandom
@@ -59,20 +59,18 @@ def generate(
     - 未提供 ``out_dir`` 与 ``dsn`` → 内存模式，只生成不落盘（默认）
     - 提供 ``dsn`` → 直接执行入库
     - 提供 ``out_dir`` → 显式落盘 SQL / CSV
+
+    多表时按拓扑序生成（父先于子），子表通过关系规则继承父表字段。
     """
     started = time.perf_counter()
 
-    tables = {}
     base_rng = SeededRandom(config.seed)
-    for table in config.tables:
-        # 每张表用独立的子随机源，避免某表行数变化影响其他表的随机序列
-        tables[table.name] = generate_table(config, table, base_rng.fork(table.name))
-
-    elapsed_ms = int((time.perf_counter() - started) * 1000)
-    result = GenerateResult(tables=tables, elapsed_ms=elapsed_ms, seed=config.seed)
+    result = generate_all(config, base_rng)
 
     target = sink or resolve_sink(
         config, out_dir=out_dir, dsn=dsn, dialect=dialect, dry_run=dry_run
     )
     target.write(result)
+
+    result.elapsed_ms = int((time.perf_counter() - started) * 1000)
     return result

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from . import service
@@ -24,8 +25,17 @@ console = Console()
 CONFIG_OPTION = typer.Option(..., "-c", "--config", help="配置文件路径（单个 YAML）")
 
 
+def _plain(text: str) -> str:
+    """转义 rich 标记。
+
+    配置里的表名、字段名会被拼成 ``tables[t_txn]`` 这样的路径 ——
+    其中的 ``[...]`` 会被 rich 当成样式标记吃掉，导致输出缺字。
+    """
+    return escape(str(text))
+
+
 def _fail(message: str) -> None:
-    console.print(f"[bold red]✗[/bold red] {message}")
+    console.print(f"[bold red]✗[/bold red] {_plain(message)}")
     raise typer.Exit(code=1)
 
 
@@ -84,7 +94,7 @@ def check(config: Path = CONFIG_OPTION) -> None:
 
     console.print(f"[bold red]✗ 发现 {len(problems)} 个问题：[/bold red]")
     for problem in problems:
-        console.print(f"  - {problem}")
+        console.print(f"  - {_plain(problem)}")
     raise typer.Exit(code=1)
 
 
@@ -103,7 +113,7 @@ def gen(
     if problems:
         console.print(f"[bold red]✗ 配置存在问题，已中止（{len(problems)} 条）：[/bold red]")
         for problem in problems:
-            console.print(f"  - {problem}")
+            console.print(f"  - {_plain(problem)}")
         raise typer.Exit(code=1)
 
     try:
@@ -135,10 +145,10 @@ def gen(
             title=f"{name} 预览（前 {min(preview, len(data.rows))} 行）", title_justify="left"
         )
         for column in data.columns:
-            preview_table.add_column(column, overflow="fold")
+            preview_table.add_column(_plain(column), overflow="fold")
         for row in data.rows[:preview]:
             preview_table.add_row(
-                *(str(row.values.get(column, "")) for column in data.columns)
+                *(_plain(row.values.get(column, "")) for column in data.columns)
             )
         console.print(preview_table)
 

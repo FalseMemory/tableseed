@@ -8,11 +8,13 @@ from __future__ import annotations
 
 from collections import Counter
 
-from ..errors import ExprError
+from ..errors import ExprError, PlanError
 from ..expr import Expression, build_functions
 from ..models import FINITE_GROUP_TYPES, SeedConfig, TableSpec
 from ..rng import SeededRandom
 from ..engine.group_expander import combo_count, finite_groups
+from ..engine.propagator import effective_rules
+from ..engine.topology import topo_order
 
 
 def check_config(config: SeedConfig) -> list[str]:
@@ -20,9 +22,19 @@ def check_config(config: SeedConfig) -> list[str]:
     problems: list[str] = []
     funcs = build_functions(SeededRandom(config.seed))
 
+    # 由 propagate 提供取值的字段 —— 它们不必再归入任何组
+    propagated = _propagated_fields(config)
+
     problems.extend(_check_table_names(config))
     for table in config.tables:
-        problems.extend(_check_table(table, funcs))
+        problems.extend(
+            _check_table(
+                table,
+                funcs,
+                has_parent=table.name in {r.child for r in config.relations},
+                propagated=propagated.get(table.name, set()),
+            )
+        )
     problems.extend(_check_relations(config))
     problems.extend(_check_limits(config))
     problems.extend(_check_expressions(config, funcs))
@@ -38,9 +50,15 @@ def _check_table_names(config: SeedConfig) -> list[str]:
     ]
 
 
-def _check_table(table: TableSpec, funcs: dict) -> list[str]:
+def _check_table(
+    table: TableSpec,
+    funcs: dict,
+    has_parent: bool = False,
+    propagated: set[str] | None = None,
+) -> list[str]:
     problems: list[str] = []
     path = f"tables[{table.name}]"
+    propagated = propagated or set()
 
     if not table.groups:
         return [f"{path}: 未定义任何字段组"]
@@ -62,12 +80,13 @@ def _check_table(table: TableSpec, funcs: dict) -> list[str]:
 
     if table.columns:
         declared = {c.name for c in table.columns}
-        ungrouped = sorted(declared - set(occurrences))
+        # 由 propagate 提供取值的字段视为「已有着落」，不要求再归组
+        ungrouped = sorted(declared - set(occurrences) - propagated)
         unknown = sorted(set(occurrences) - declared)
         if ungrouped:
             problems.append(
                 f"{path}: 已声明但未分组的字段: {', '.join(ungrouped)}"
-                "（每个字段都必须归入某个组）"
+                "（每个字段都必须归入某个组，或由 propagate 提供取值）"
             )
         if unknown:
             problems.append(
@@ -110,11 +129,12 @@ def _check_table(table: TableSpec, funcs: dict) -> list[str]:
         if group.type == "ref" and not group.from_:
             problems.append(f"{group_path}: ref 组必须提供 from（源表.源字段）")
 
-    if not finite_groups(table):
+    if not finite_groups(table) and not has_parent:
         problems.append(
             f"{path}: 没有任何有限取值组，无法通过笛卡尔积确定行数"
             "（请至少提供一个 enum / boundary / dict 组）"
         )
+        # 有父表的表行数由父表决定，可以完全没有有限组
 
     return problems
 
@@ -123,20 +143,46 @@ def _check_relations(config: SeedConfig) -> list[str]:
     problems: list[str] = []
     names = {t.name for t in config.tables}
 
+    # ---- 全局结构：环 / 多父 ----
+    try:
+        topo_order(config)
+    except PlanError as exc:
+        problems.append(str(exc))
+
+    parents_of: dict[str, list[str]] = {}
+    for relation in config.relations:
+        parents_of.setdefault(relation.child, []).append(relation.parent)
+    for child, parents in parents_of.items():
+        if len(parents) > 1:
+            problems.append(
+                f"relations: 表 {child} 有多个父表（{', '.join(parents)}）"
+                " —— 多父关系计划在 M4 支持"
+            )
+
     for index, relation in enumerate(config.relations):
         path = f"relations[{index}]"
         if relation.parent not in names:
             problems.append(f"{path}: 父表不存在: {relation.parent}")
         if relation.child not in names:
             problems.append(f"{path}: 子表不存在: {relation.child}")
-        if not relation.join:
-            problems.append(f"{path}: 未声明关联锚点 join")
+        if not relation.join and not relation.propagate:
+            problems.append(
+                f"{path}: 既未声明关联锚点 join，也没有任何 propagate 规则"
+                "（父子表之间将完全无关）"
+            )
         if relation.existence == "conditional" and not relation.condition:
             problems.append(f"{path}: existence=conditional 需要提供 condition")
+        if relation.existence == "optional" and not relation.condition:
+            problems.append(
+                f"{path}: existence=optional 但未给 condition，当前等同 required"
+                "（如需按比例缺失，请写条件表达式）"
+            )
+        if relation.cardinality == "N:M":
+            problems.append(f"{path}: N:M 基数计划在 M4 支持")
 
         if relation.parent in names and relation.child in names:
-            parent_fields = _all_fields(config.table(relation.parent))
-            child_fields = _all_fields(config.table(relation.child))
+            parent_fields = _known_fields(config.table(relation.parent))
+            child_fields = _known_fields(config.table(relation.child))
             for key in relation.join:
                 if key.parent_field not in parent_fields:
                     problems.append(
@@ -146,8 +192,74 @@ def _check_relations(config: SeedConfig) -> list[str]:
                     problems.append(
                         f"{path}: 子表 {relation.child} 中不存在字段 {key.child_field}"
                     )
+            problems.extend(_check_propagate(config, relation, index, child_fields, parent_fields))
 
     return problems
+
+
+def _check_propagate(
+    config: SeedConfig,
+    relation,
+    index: int,
+    child_fields: set[str],
+    parent_fields: set[str],
+) -> list[str]:
+    """逐条校验传播规则 —— 「字段要对得上」最容易在这里写错。"""
+    problems: list[str] = []
+    declared: set[str] = set()
+
+    for pos, rule in enumerate(relation.propagate):
+        path = f"relations[{index}].propagate[{pos}]({rule.mode}→{rule.to})"
+
+        if rule.to in declared:
+            problems.append(f"{path}: 同一子字段被多条传播规则声明")
+        declared.add(rule.to)
+
+        if rule.mode == "free":
+            continue
+
+        if rule.to not in child_fields:
+            problems.append(
+                f"{path}: 子表 {relation.child} 中不存在字段 {rule.to}"
+                f"（可用字段: {', '.join(sorted(child_fields))}）"
+            )
+
+        if rule.mode in {"copy", "map"}:
+            if not rule.from_:
+                problems.append(f"{path}: {rule.mode} 传播缺少 from（父字段名）")
+            elif rule.from_ not in parent_fields:
+                problems.append(
+                    f"{path}: 父表 {relation.parent} 中不存在字段 {rule.from_}"
+                    f"（可用字段: {', '.join(sorted(parent_fields))}）"
+                )
+
+        if rule.mode == "map" and not rule.mapping:
+            problems.append(f"{path}: map 传播必须提供 mapping 映射表")
+
+        if rule.mode == "derive":
+            if not rule.expr:
+                problems.append(f"{path}: derive 传播必须提供 expr")
+            if rule.expr and not rule.from_ and not _mentions_parent(rule.expr, parent_fields):
+                problems.append(
+                    f"{path}: 表达式 {rule.expr!r} 没有引用任何父表字段"
+                    "（如需引用请写 parent.xxx）"
+                )
+
+        if rule.mode == "split":
+            problems.append(f"{path}: split 传播（父子金额拆分）计划在 M4 支持")
+
+    return problems
+
+
+def _mentions_parent(expr: str, parent_fields: set[str]) -> bool:
+    """表达式是否引用了父表字段（``parent.x`` 或直接的父字段名）。"""
+    try:
+        names = Expression(expr, build_functions(SeededRandom(0)), "check").names
+    except ExprError:
+        return True  # 表达式本身有问题 —— 交给 _check_expressions 报错
+    return bool(names & parent_fields) or "parent" in names
+
+
 
 
 def _check_limits(config: SeedConfig) -> list[str]:
@@ -200,7 +312,34 @@ def _check_expressions(config: SeedConfig, funcs: dict) -> list[str]:
 
 
 def _all_fields(table: TableSpec) -> set[str]:
+    """组里出现过的字段。"""
     fields: set[str] = set()
     for group in table.groups:
         fields.update(group.fields)
     return fields
+
+
+def _known_fields(table: TableSpec) -> set[str]:
+    """这张表**存在**的字段 = 组字段 ∪ 已声明的列。
+
+    校验传播规则时要用这个 —— 子表字段可能完全由 propagate 提供值，
+    压根不在任何组里。
+    """
+    fields = _all_fields(table)
+    if table.columns:
+        fields.update(c.name for c in table.columns)
+    return fields
+
+
+def _propagated_fields(config: SeedConfig) -> dict[str, set[str]]:
+    """统计每张子表里「由传播规则提供取值」的字段。
+
+    ``free`` 模式表示不传播，因此不算提供。
+    """
+    result: dict[str, set[str]] = {}
+    for relation in config.relations:
+        bucket = result.setdefault(relation.child, set())
+        for rule in effective_rules(relation):  # 含 join 自动补齐的 copy
+            if rule.mode != "free":
+                bucket.add(rule.to)
+    return result

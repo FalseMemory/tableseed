@@ -156,3 +156,153 @@ tables:
 def test_unknown_config_key_raises():
     with pytest.raises(ConfigError, match="配置校验失败"):
         load_config_from_text("seed: 1\ntables: []\nnope: 1")
+
+
+# ---------------------------------------------------------------- M2 关系校验
+
+
+TWO_TABLES = """
+seed: 1
+tables:
+  - name: t_a
+    groups:
+      - {type: enum, name: g_a, fields: [a_id], values: [["1"]]}
+  - name: t_b
+    groups:
+      - {type: enum, name: g_b, fields: [b_id], values: [["1"]]}
+relations:
+"""
+
+
+@allure.feature("配置校验")
+@allure.story("关系成环")
+def test_relation_cycle_is_reported():
+    text = """
+seed: 1
+tables:
+  - name: a
+    groups: [{type: enum, name: g, fields: [x], values: [["1"]]}]
+  - name: b
+    groups: [{type: enum, name: g, fields: [y], values: [["1"]]}]
+relations:
+  - {parent: a, child: b, join: [{parent_field: x, child_field: y}]}
+  - {parent: b, child: a, join: [{parent_field: y, child_field: x}]}
+"""
+    assert any("循环依赖" in p for p in problems_of(text))
+
+
+@allure.feature("配置校验")
+@allure.story("多父关系")
+def test_multi_parent_is_reported():
+    text = """
+seed: 1
+tables:
+  - name: a
+    groups: [{type: enum, name: g, fields: [x], values: [["1"]]}]
+  - name: b
+    groups: [{type: enum, name: g, fields: [y], values: [["1"]]}]
+  - name: c
+    groups: [{type: enum, name: g, fields: [z], values: [["1"]]}]
+relations:
+  - {parent: a, child: c, join: [{parent_field: x, child_field: z}]}
+  - {parent: b, child: c, join: [{parent_field: y, child_field: z}]}
+"""
+    assert any("多个父表" in p for p in problems_of(text))
+
+
+@allure.feature("配置校验")
+@allure.story("传播目标字段必须存在")
+def test_propagate_to_unknown_field_is_reported():
+    text = TWO_TABLES + """
+  - parent: t_a
+    child: t_b
+    join: [{parent_field: a_id, child_field: b_id}]
+    propagate:
+      - {mode: copy, to: nope, from: a_id}
+"""
+    assert any("不存在字段 nope" in p for p in problems_of(text))
+
+
+@allure.feature("配置校验")
+@allure.story("copy 源字段必须存在")
+def test_propagate_from_unknown_field_is_reported():
+    text = TWO_TABLES + """
+  - parent: t_a
+    child: t_b
+    join: [{parent_field: a_id, child_field: b_id}]
+    propagate:
+      - {mode: copy, to: b_id, from: nope}
+"""
+    assert any("不存在字段 nope" in p for p in problems_of(text))
+
+
+@allure.feature("配置校验")
+@allure.story("map 必须有映射表")
+def test_map_without_mapping_is_reported():
+    text = TWO_TABLES + """
+  - parent: t_a
+    child: t_b
+    join: [{parent_field: a_id, child_field: b_id}]
+    propagate:
+      - {mode: map, to: b_id, from: a_id}
+"""
+    assert any("必须提供 mapping" in p for p in problems_of(text))
+
+
+@allure.feature("配置校验")
+@allure.story("derive 传播必须引用父字段")
+def test_derive_without_parent_reference_is_reported():
+    text = TWO_TABLES + """
+  - parent: t_a
+    child: t_b
+    join: [{parent_field: a_id, child_field: b_id}]
+    propagate:
+      - {mode: derive, to: b_id, expr: "1 + 1"}
+"""
+    assert any("没有引用任何父表字段" in p for p in problems_of(text))
+
+
+@allure.feature("配置校验")
+@allure.story("被传播覆盖的字段无需归组")
+def test_propagated_field_needs_no_group():
+    """字段由 propagate 提供取值时，不必再要求它归入某个组。"""
+    text = """
+seed: 1
+tables:
+  - name: t_a
+    columns: [{name: a_id}]
+    groups:
+      - {type: enum, name: g_a, fields: [a_id], values: [["1"]]}
+  - name: t_b
+    columns: [{name: b_id}, {name: a_id}]
+    groups:
+      - {type: enum, name: g_b, fields: [b_id], values: [["1"]]}
+relations:
+  - parent: t_a
+    child: t_b
+    join: [{parent_field: a_id, child_field: a_id}]
+"""
+    assert problems_of(text) == []
+
+
+@allure.feature("配置校验")
+@allure.story("子表可无有限取值组")
+def test_child_table_without_finite_group_is_ok():
+    """子表行数由父表决定，可以完全没有有限取值组。"""
+    text = """
+seed: 1
+tables:
+  - name: t_a
+    groups:
+      - {type: enum, name: g_a, fields: [a_id], values: [["1"]]}
+  - name: t_b
+    groups:
+      - {type: const, name: g_c, fields: [remark], value: ["x"]}
+relations:
+  - parent: t_a
+    child: t_b
+    propagate:
+      - {mode: copy, to: remark, from: a_id}
+"""
+    problems = problems_of(text)
+    assert not any("有限取值组" in p for p in problems)
