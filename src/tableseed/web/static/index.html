@@ -104,6 +104,22 @@
   .chip.on { color: var(--warn); border-color: rgba(210,153,34,.5); }
   .bar { height: 4px; background: var(--panel-2); border-radius: 3px; overflow: hidden; margin-bottom: 12px; }
   .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+
+  /* ---- 关系图 ---- */
+  .graph-wrap { overflow: auto; }
+  .graph-wrap svg { display: block; }
+  .g-node-box { fill: var(--panel); stroke: rgba(255,255,255,.14); stroke-width: 1; }
+  .g-node-box.root { stroke: rgba(76,141,255,.55); }
+  .g-node-title { fill: var(--text); font: 600 13px system-ui, sans-serif; }
+  .g-node-meta { fill: var(--muted); font: 11px var(--mono); }
+  .g-group-chip { fill: rgba(210,153,34,.16); stroke: rgba(210,153,34,.45); }
+  .g-group-text { fill: var(--warn); font: 10px var(--mono); }
+  .g-edge { stroke: rgba(255,255,255,.28); stroke-width: 1.4; fill: none; }
+  .g-edge.agg { stroke: rgba(210,153,34,.6); stroke-dasharray: 5 4; }
+  .g-card { fill: var(--panel-2); stroke: var(--line); }
+  .g-card-text { fill: var(--accent); font: 10px var(--mono); }
+  g.node:hover .g-node-box { stroke: var(--accent); }
+
 </style>
 </head>
 <body>
@@ -134,12 +150,17 @@
   <section class="panels">
     <nav class="tabs">
       <button data-tab="plan" class="active">预演</button>
+      <button data-tab="graph">关系图</button>
       <button data-tab="result">结果预览</button>
       <button data-tab="sql">SQL 查询台</button>
     </nav>
 
     <div class="tab-body" id="tab-plan">
       <div class="empty">点击「预演」查看各表组合数与计划行数。</div>
+    </div>
+
+    <div class="tab-body graph-wrap" id="tab-graph" hidden>
+      <div class="empty">点击「预演」或「校验」后查看表间关系图。</div>
     </div>
 
     <div class="tab-body" id="tab-result" hidden>
@@ -281,6 +302,107 @@ async function runPlan() {
   } catch (e) { out.innerHTML = msg("err", e.message); }
 }
 
+// ---------------------------------------------------------------- 关系图
+
+const MODE_LABEL = { copy: "复制", derive: "派生", map: "映射", free: "自由", split: "拆分", aggregate: "汇总" };
+
+async function runGraph() {
+  const out = $("tab-graph");
+  try {
+    const g = await api("/api/graph", {
+      method: "POST",
+      body: JSON.stringify({ text: $("yaml").value }),
+    });
+    out.innerHTML = (g.cyclic ? msg("err", g.cyclic) : "") + renderGraph(g);
+  } catch (e) {
+    out.innerHTML = msg("err", e.message);
+  }
+}
+
+function renderGraph(g) {
+  if (!g.nodes.length) return '<div class="empty">配置里还没有表。</div>';
+
+  const NODE_W = 186, NODE_H = 58, GAP_X = 128, GAP_Y = 34, PAD = 24;
+
+  // 按 layer 分列，列内纵向排开
+  const cols = {};
+  g.nodes.forEach((n) => { (cols[n.layer] = cols[n.layer] || []).push(n); });
+  const layers = Object.keys(cols).map(Number).sort((a, b) => a - b);
+  const maxRows = Math.max(...layers.map((l) => cols[l].length));
+
+  const pos = {};
+  layers.forEach((l) => {
+    const list = cols[l];
+    const colH = list.length * NODE_H + (list.length - 1) * GAP_Y;
+    const top = (maxRows * NODE_H + (maxRows - 1) * GAP_Y - colH) / 2;  // 垂直居中
+    list.forEach((n, i) => {
+      pos[n.name] = { x: PAD + l * (NODE_W + GAP_X), y: PAD + top + i * (NODE_H + GAP_Y), node: n };
+    });
+  });
+
+  const width = PAD * 2 + layers.length * NODE_W + (layers.length - 1) * GAP_X;
+  const height = PAD * 2 + maxRows * NODE_H + (maxRows - 1) * GAP_Y;
+
+  let svg = `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`;
+  svg += `<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(255,255,255,.45)"/></marker></defs>`;
+
+  // ---- 边 ----
+  g.edges.forEach((e) => {
+    const a = pos[e.parent], b = pos[e.child];
+    if (!a || !b) return;
+    const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2;
+    const x2 = b.x, y2 = b.y + NODE_H / 2;
+    const mx = (x1 + x2) / 2;
+    const isAgg = e.modes.includes("aggregate");
+    svg += `<path class="g-edge${isAgg ? " agg" : ""}" d="M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}" marker-end="url(#arrow)"/>`;
+
+    // 基数标签
+    const label = `${e.cardinality}${e.existence === "conditional" ? "?" : ""}`;
+    const lw = label.length * 7 + 12;
+    svg += `<rect class="g-card" x="${mx - lw / 2}" y="${(y1 + y2) / 2 - 9}" width="${lw}" height="17" rx="8"/>`;
+    svg += `<text class="g-card-text" x="${mx}" y="${(y1 + y2) / 2 + 3.5}" text-anchor="middle">${escapeHtml(label)}</text>`;
+
+    // 传播模式徽章（贴在边中点偏下）
+    const modes = e.modes.filter((m) => m !== "free").map((m) => MODE_LABEL[m] || m).join("/");
+    if (modes) {
+      svg += `<text class="g-node-meta" x="${mx}" y="${(y1 + y2) / 2 + 22}" text-anchor="middle">${escapeHtml(modes)}</text>`;
+    }
+  });
+
+  // ---- 节点 ----
+  g.nodes.forEach((n) => {
+    const p = pos[n.name];
+    if (!p) return;
+    svg += `<g class="node" transform="translate(${p.x},${p.y})"><title>${escapeHtml(n.fields.join("\n"))}</title>`;
+    svg += `<rect class="g-node-box${n.is_root ? " root" : ""}" width="${NODE_W}" height="${NODE_H}" rx="9"/>`;
+    svg += `<text class="g-node-title" x="13" y="23">${escapeHtml(n.name)}</text>`;
+    svg += `<text class="g-node-meta" x="13" y="41">${n.field_count} 字段 · ${n.finite_count} 有限组</text>`;
+    if (n.is_root) svg += `<text class="g-node-meta" x="${NODE_W - 12}" y="23" text-anchor="end" fill="var(--accent)">根表</text>`;
+    if (n.aggregates.length) {
+      svg += `<rect class="g-group-chip" x="13" y="46" width="${n.aggregates.length * 9 + 34}" height="0" rx="4"/>`;
+      svg += `<text class="g-group-text" x="${NODE_W - 12}" y="41" text-anchor="end">${escapeHtml(n.aggregates.join(","))}</text>`;
+    }
+    svg += `</g>`;
+  });
+
+  svg += "</svg>";
+  return svg + legendHtml(g);
+}
+
+function legendHtml(g) {
+  const rows = g.edges.map((e) => ({
+    "父 → 子": `${e.parent} → ${e.child}`,
+    "基数": e.cardinality,
+    "存在性": e.existence,
+    "锚点": e.join.map((k) => `${k.parent_field}=${k.child_field}`).join(", ") || "-",
+    "驱动字段": e.drive_by.join(", ") || "-",
+    "传播": e.propagate.map((r) => `${MODE_LABEL[r.mode] || r.mode}→${r.to}`).join(" · ") || "-",
+  }));
+  const head = ["父 → 子", "基数", "存在性", "锚点", "驱动字段", "传播"];
+  return '<div style="height:16px"></div>' + tableHtml(head, rows.map((r) => head.map((h) => r[h])));
+}
+
 // ---------------------------------------------------------------- 生成（SSE）
 
 async function runGenerate() {
@@ -379,7 +501,8 @@ async function runSql() {
 
 function switchTab(name) {
   document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
-  ["plan", "result", "sql"].forEach((t) => { $("tab-" + t).hidden = t !== name; });
+  ["plan", "graph", "result", "sql"].forEach((t) => { $("tab-" + t).hidden = t !== name; });
+  if (name === "graph") runGraph();  // 每次切入都重取，配置可能刚改过
 }
 
 document.querySelectorAll(".tabs button").forEach((b) => {

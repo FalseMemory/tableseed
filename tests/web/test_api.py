@@ -141,3 +141,87 @@ def test_sql_without_dsn_is_rejected(client):
     response = client.post("/api/sql/execute", json={"sql": "SELECT 1"})
     assert response.status_code == 400
     assert "未配置数据库连接" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------- M2 关系图
+
+
+TWO_TABLES = """
+seed: 20260910
+tables:
+  - name: t_txn
+    groups:
+      - {type: enum, name: g_type, fields: [txn_type], values: [["T"], ["D"]]}
+      - {type: sequence, name: g_no, fields: [txn_no], format: "TXN{seq:04d}"}
+  - name: t_detail
+    groups:
+      - {type: enum, name: g_s, fields: [status], values: [["S0"], ["S1"], ["S2"]]}
+relations:
+  - parent: t_txn
+    child: t_detail
+    cardinality: "1:1"
+    drive_by: [txn_type]
+    join: [{parent_field: txn_no, child_field: txn_no}]
+    propagate:
+      - {mode: copy, to: status, from: txn_type}
+"""
+
+
+@allure.epic("tableseed")
+@allure.feature("WebUI API")
+@allure.story("关系图数据")
+def test_graph_endpoint_returns_nodes_and_edges(client):
+    graph = client.post("/api/graph", json={"text": TWO_TABLES}).json()
+
+    assert graph["order"] == ["t_txn", "t_detail"]
+    assert [n["name"] for n in graph["nodes"]] == ["t_txn", "t_detail"]
+
+    by_name = {n["name"]: n for n in graph["nodes"]}
+    assert by_name["t_txn"]["layer"] == 0
+    assert by_name["t_txn"]["is_root"] is True
+    assert by_name["t_detail"]["layer"] == 1
+    assert by_name["t_detail"]["is_root"] is False
+
+    edge = graph["edges"][0]
+    assert edge["cardinality"] == "1:1"
+    assert edge["drive_by"] == ["txn_type"]
+    # join 自动补齐的 copy 也要出现在图上
+    assert any(r["to"] == "txn_no" for r in edge["propagate"])
+
+
+@allure.epic("tableseed")
+@allure.feature("WebUI API")
+@allure.story("关系图在成环时仍可渲染")
+def test_graph_endpoint_survives_cycle(client):
+    cyclic = """
+seed: 1
+tables:
+  - name: a
+    groups: [{type: enum, name: g, fields: [x], values: [["1"]]}]
+  - name: b
+    groups: [{type: enum, name: g, fields: [y], values: [["1"]]}]
+relations:
+  - {parent: a, child: b, join: [{parent_field: x, child_field: y}]}
+  - {parent: b, child: a, join: [{parent_field: y, child_field: x}]}
+"""
+    graph = client.post("/api/graph", json={"text": cyclic}).json()
+    assert graph["cyclic"]          # 环要被报出来
+    assert len(graph["nodes"]) == 2  # 但图仍要画得出来
+
+
+@allure.epic("tableseed")
+@allure.feature("WebUI API")
+@allure.story("SSE 生成必须经过关系内核")
+def test_generate_stream_applies_relations(client):
+    """回归：SSE 曾绕过 generate_all，逐表生成导致子表关系全部丢失。"""
+    response = client.post("/api/generate/stream", json={"text": TWO_TABLES})
+    assert response.status_code == 200
+
+    result = client.get("/api/result").json()
+    assert result["tables"]["t_txn"]["count"] == 2
+    assert result["tables"]["t_detail"]["count"] == 2  # 1:1 不放大
+
+    # join 自动 copy：子行主键必须能在父表中找到
+    parent_keys = {r["txn_no"] for r in result["tables"]["t_txn"]["rows"]}
+    for row in result["tables"]["t_detail"]["rows"]:
+        assert row["txn_no"] in parent_keys

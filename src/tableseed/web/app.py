@@ -169,6 +169,34 @@ def create_app(config_path: str | None = None) -> FastAPI:
         result = service.plan(config)
         return result.model_dump()
 
+    # ---------------------------------------------------------------- 关系图
+
+    @app.post("/api/graph")
+    def graph(payload: ConfigPayload) -> dict[str, Any]:
+        """表间关系图数据：分层节点 + 带基数/传播标签的边。"""
+        try:
+            config = state.parse(payload.text)
+        except TableSeedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        try:
+            from ..engine.topology import topo_order  # noqa: PLC0415
+
+            order = topo_order(config)
+        except TableSeedError as exc:
+            # 成环时也要能把图画出来 —— 环本身就是最需要被看见的问题
+            order = [t.name for t in config.tables]
+            cyclic = str(exc)
+        else:
+            cyclic = None
+
+        return {
+            "order": order,
+            "nodes": _graph_nodes(config, order),
+            "edges": _graph_edges(config),
+            "cyclic": cyclic,
+        }
+
     # ---------------------------------------------------------------- 生成
 
     @app.post("/api/generate")
@@ -214,28 +242,35 @@ def create_app(config_path: str | None = None) -> FastAPI:
             total = len(config.tables)
             yield _sse("progress", {"done": 0, "total": total, "table": None})
 
-            started = time.perf_counter()
-            tables: dict[str, Any] = {}
-            from ..engine import generate_table  # noqa: PLC0415
-            from ..models import GenerateResult  # noqa: PLC0415
-            from ..rng import SeededRandom  # noqa: PLC0415
+            events: list[dict[str, Any]] = []
 
-            base_rng = SeededRandom(config.seed)
-            for index, table in enumerate(config.tables, start=1):
-                try:
-                    tables[table.name] = generate_table(
-                        config, table, base_rng.fork(table.name)
+            def on_progress(event: str, payload_: dict[str, Any]) -> None:
+                events.append({"event": event, "data": payload_})
+
+            try:
+                # 必须走 generate_all —— 只有它按拓扑序生成并应用关系传播。
+                # 逐表调用 generate_table 会绕过父子关系，造出对不上的数据。
+                from ..engine import generate_all  # noqa: PLC0415
+
+                result = generate_all(config, progress=on_progress)
+            except TableSeedError as exc:
+                yield _sse("error", {"message": str(exc)})
+                return
+
+            for item in events:
+                if item["event"] == "table_done":
+                    yield _sse(
+                        "progress",
+                        {
+                            "done": item["data"]["done"],
+                            "total": item["data"]["total"],
+                            "table": item["data"]["table"],
+                            "rows": item["data"]["rows"],
+                        },
                     )
-                except TableSeedError as exc:
-                    yield _sse("error", {"message": str(exc)})
-                    return
-                yield _sse(
-                    "progress",
-                    {"done": index, "total": total, "table": table.name},
-                )
-
-            elapsed_ms = int((time.perf_counter() - started) * 1000)
-            result = GenerateResult(tables=tables, elapsed_ms=elapsed_ms, seed=config.seed)
+                else:
+                    yield _sse("warning", {"message": item["data"]["message"]})
+            events.clear()
 
             from ..sink import resolve_sink  # noqa: PLC0415
 
@@ -296,6 +331,77 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
 
 # ---------------------------------------------------------------- 内部实现
+
+
+def _graph_nodes(config: SeedConfig, order: list[str]) -> list[dict[str, Any]]:
+    """图的节点 = 表。layer 用于分层布局（父在左、子在右）。"""
+    from ..engine.group_expander import finite_groups  # noqa: PLC0415
+
+    parents = {r.child for r in config.relations}
+    layer: dict[str, int] = {}
+    for name in order:
+        incoming = [r.parent for r in config.relations if r.child == name]
+        layer[name] = 0 if not incoming else max(layer.get(p, 0) + 1 for p in incoming)
+
+    nodes = []
+    for table in config.tables:
+        fields: list[str] = []
+        for group in table.groups:
+            for field in group.fields:
+                if field not in fields:
+                    fields.append(field)
+        if table.columns:  # 由 propagate 提供的字段也要显示
+            for column in table.columns:
+                if column.name not in fields:
+                    fields.append(column.name)
+
+        aggregates = [g.name for g in table.groups if g.type == "aggregate"]
+        nodes.append(
+            {
+                "name": table.name,
+                "layer": layer.get(table.name, 0),
+                "is_root": table.name not in parents,
+                "field_count": len(fields),
+                "finite_count": len(finite_groups(table)),
+                "aggregates": aggregates,
+                "fields": fields,
+            }
+        )
+    return nodes
+
+
+def _graph_edges(config: SeedConfig) -> list[dict[str, Any]]:
+    """图的边 = 关系，标签带上基数、锚点与传播模式。"""
+    from ..engine.propagator import effective_rules  # noqa: PLC0415
+
+    edges = []
+    for relation in config.relations:
+        rules = effective_rules(relation)
+        modes: list[str] = []
+        for rule in rules:
+            if rule.mode not in modes:
+                modes.append(rule.mode)
+        edges.append(
+            {
+                "parent": relation.parent,
+                "child": relation.child,
+                "cardinality": relation.cardinality,
+                "existence": relation.existence,
+                "join": [k.model_dump() for k in relation.join],
+                "propagate": [
+                    {
+                        "mode": r.mode,
+                        "to": r.to,
+                        "from": r.from_,
+                        "expr": r.expr,
+                    }
+                    for r in rules
+                ],
+                "modes": modes,
+                "drive_by": list(relation.drive_by),
+            }
+        )
+    return edges
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:

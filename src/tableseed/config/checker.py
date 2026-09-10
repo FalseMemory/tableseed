@@ -159,6 +159,9 @@ def _check_relations(config: SeedConfig) -> list[str]:
                 " —— 多父关系计划在 M4 支持"
             )
 
+    propagated = _propagated_fields(config)
+    anchors = _join_anchor_fields(config)
+
     for index, relation in enumerate(config.relations):
         path = f"relations[{index}]"
         if relation.parent not in names:
@@ -181,8 +184,12 @@ def _check_relations(config: SeedConfig) -> list[str]:
             problems.append(f"{path}: N:M 基数计划在 M4 支持")
 
         if relation.parent in names and relation.child in names:
+            # 子表字段 = 组字段 ∪ 声明列 ∪ join 锚点字段
             parent_fields = _known_fields(config.table(relation.parent))
-            child_fields = _known_fields(config.table(relation.child))
+            child_fields = (
+                _known_fields(config.table(relation.child))
+                | anchors.get(relation.child, set())
+            )
             for key in relation.join:
                 if key.parent_field not in parent_fields:
                     problems.append(
@@ -332,7 +339,7 @@ def _known_fields(table: TableSpec) -> set[str]:
 
 
 def _propagated_fields(config: SeedConfig) -> dict[str, set[str]]:
-    """统计每张子表里「由传播规则提供取值」的字段。
+    """每张子表里「由传播规则提供取值」的字段（用于豁免「必须归组」）。
 
     ``free`` 模式表示不传播，因此不算提供。
     """
@@ -342,4 +349,21 @@ def _propagated_fields(config: SeedConfig) -> dict[str, set[str]]:
         for rule in effective_rules(relation):  # 含 join 自动补齐的 copy
             if rule.mode != "free":
                 bucket.add(rule.to)
+    return result
+
+
+def _join_anchor_fields(config: SeedConfig) -> dict[str, set[str]]:
+    """``join`` 锚点声明的子字段。
+
+    锚点字段由 join 本身赋予存在性 —— 声明了 ``{child_field: txn_no}``
+    就等于声明了子表有 txn_no 这个字段。
+
+    与之相对，用户**显式**书写的 ``propagate.to`` 必须严格校验：
+    拼错字段名是要报出来的，否则「对不上」会静默失败。
+    """
+    result: dict[str, set[str]] = {}
+    for relation in config.relations:
+        if relation.join:
+            bucket = result.setdefault(relation.child, set())
+            bucket.update(key.child_field for key in relation.join)
     return result
