@@ -1,11 +1,9 @@
 # tableseed
 
-> 多表联合造数工具 —— 按「字段分组」描述数据规则，生成跨表一致、可直接入库的测试数据。
-
-给一组表、它们之间的关联关系，以及每个字段所属**分组**的取值规则，产出可以直接入库、跨表对得上账、且规则覆盖可证明的测试数据。
+> 多表联合造数工具 —— 用「字段分组」描述单表规则，用「表间关系」描述跨表联动，生成一致、可入库、覆盖可证明的测试数据。
 
 ```
-表结构 + 表间关联 + 字段分组规则  ──►  tableseed  ──►  SQL / CSV / 直连入库
+表结构 + 表间关系 + 字段分组规则  ──►  tableseed  ──►  SQL / CSV / 直连入库
 ```
 
 ## 它要解决什么
@@ -15,7 +13,9 @@
 | 痛点 | 具体表现 |
 | --- | --- |
 | 关联断裂 | 流水表的 `acct_no` 在主表里查不到，外键直接炸 |
-| 口径不符 | 明细汇总与余额表对不上，数据核对场景无法使用 |
+| 配对缺失 | 交易表造了 100 条，详情表只跟上 87 条，对不上账 |
+| 字段不同步 | 同一笔交易，交易表币种是 CNY，详情表写成 USD |
+| 口径不符 | 明细汇总与主表金额对不上，数据核对场景无法使用 |
 | 规则散落 | 枚举取值、码值描述、边界值写死在几十份 INSERT 脚本里，改一处漏三处 |
 | 同组不同步 | `status_code` 改成 `02`，`status_desc` 还是「正常」，造出脏数据 |
 | 覆盖不足 | 只造了「正常 + 人民币 + 柜面」，其余组合从未被验证，却报"已测" |
@@ -23,19 +23,21 @@
 | 不可复现 | 随机造数每次结果不同，缺陷无法稳定重现 |
 | 状态跳跃 | 造出「已销户却仍有在途交易」这类业务上不可能存在的组合 |
 
-## 核心模型
+---
 
-tableseed 用三层结构描述一份造数配置：
+# 模型一：字段分组（Field Group）
+
+描述**单表**的造数规则，三层结构：
 
 ```
 表（Table）  ──►  字段组（Field Group）  ──►  取值（Value）
 ```
 
-### 1. 字段分组（Field Group）
+## 1.1 分组是完备划分
 
 一张表的字段被划分为若干**互不相交的组**：
 
-- 每个字段**恰好属于一个组**，不重不漏（完备划分，配置校验会强制检查）；
+- 每个字段**恰好属于一个组**，不重不漏（`check` 命令强制校验）；
 - 一个组**可以包含多个字段**；
 - **组是造数的最小规则单元** —— 造数时以组为单位决定取值，而不是以字段为单位。
 
@@ -46,44 +48,51 @@ tableseed 用三层结构描述一份造数配置：
   name: g_status
   fields: [status_code, status_desc]      # 同一组的两个字段
   values:
-    - ["01", "正常"]                       # 一个取值 = 两个字段的联合取值
+    - ["01", "正常"]                       # 一个取值 = 多个字段的联合取值
     - ["02", "冻结"]
     - ["03", "销户"]
 ```
 
 > `status_code = "02"` 时，`status_desc` 必然是「冻结」。同步关系由分组模型保证，不依赖人工维护。
 
-### 2. 组类型（Group Type）
+## 1.2 组类型
 
-| 类型 | 语义 | 参与笛卡尔积 | 典型用例 |
-| --- | :---: | :---: | --- |
-| `enum` 枚举组 | 显式列举有限取值集合（元组列表） | ✅ | 状态、币种、渠道、产品码 |
-| `boundary` 边界组 | 枚举的语义化变体，专列边界与异常值 | ✅ | 金额上限、超长字符串、`NULL`、负数 |
-| `dict` 字典组 | 从外部字典/码表取有限取值 | ✅ | 行名行号、地区码、机构码 |
-| `sequence` 自增组 | 按起始值/步长推进，支持格式化模板 | ❌ | 流水号、账号、序号 |
-| `random` 随机组 | 按生成器随机取值：区间、正则、字典、加权分布 | ❌ | 金额、日期、姓名、备注 |
-| `const` 不变组 | 全批数据取同一常量元组 | ❌ | 租户号、机构号、环境标识、版本号 |
-| `derive` 派生组 | 由同表其他字段表达式计算得出 | ❌ | 余额 = 期初 + 发生额 |
-| `ref` 引用组 | 取自其他表已生成的值（外键联动） | ❌ | 主表业务键 |
+九种组类型，按**参与生成的方式**分为三类：
 
-> 前四类（`enum` / `boundary` / `dict`，以及需要时把 `dict` 视作枚举）本质都是**有限取值集合**，因此都参与笛卡尔积展开；后四类是**每行现算**的值，不参与展开。
+| 类型 | 语义 | 参与笛卡尔积 | 阶段 | 典型用例 |
+| --- | --- | :---: | :---: | --- |
+| `enum` 枚举组 | 显式列举有限取值集合（元组列表） | ✅ | P1 | 状态、币种、渠道、产品码 |
+| `boundary` 边界组 | 枚举的语义化变体，专列边界与异常值 | ✅ | P1 | 金额上限、超长字符串、`NULL` |
+| `dict` 字典组 | 从外部字典/码表取有限取值 | ✅ | P1 | 行名行号、地区码、机构码 |
+| `sequence` 自增组 | 按起始值/步长推进，支持格式化模板 | ❌ | P1 | 流水号、账号、序号 |
+| `random` 随机组 | 按生成器随机取值：区间、正则、加权分布 | ❌ | P1 | 金额、日期、姓名 |
+| `const` 不变组 | 全批数据取同一常量元组 | ❌ | P1 | 租户号、机构号、环境标识 |
+| `derive` 派生组 | 由**同表**其他字段表达式计算得出 | ❌ | P1 | 手续费 = 金额 × 费率 |
+| `ref` 引用组 | 取自其他表已生成的值（外键联动） | ❌ | P1 | 主表业务键 |
+| `aggregate` 汇总组 | 由**子表**汇总回填到父表 | ❌ | **P2** | 笔数 = count(子行)、余额 = Σ 流水 |
 
-### 3. 生成语义
+**三类之分**（理解生成语义的关键）：
+
+- **有限取值组**（`enum` / `boundary` / `dict`）—— 有确定的取值集合，参与笛卡尔积展开；
+- **每行附着组**（`sequence` / `random` / `const` / `derive` / `ref`）—— 没有固定取值集，在每条已展开的行上现算，**不放大行数**；
+- **跨表汇总组**（`aggregate`）—— 依赖子表结果，必须等到 Phase 2 回填；单独成类是为了让调度器能自动排期。
+
+## 1.3 生成语义
 
 一条数据 = **所有组取值的组合**。两类组以不同方式参与：
 
 **① 有限取值组之间 —— 笛卡尔积（全组合）**
 
-配置里所有枚举性质的组，其取值集合做笛卡尔积，**每个组合生成一条数据**，从而保证组合覆盖是完备的、可计算的、可证明的。
+配置里所有有限取值组的取值集合做笛卡尔积，**每个组合生成一条数据**，从而保证组合覆盖是完备的、可计算的、可证明的。
 
-**② 非枚举组 —— 在已展开的行上"附着"生成**
+**② 其余组 —— 在已展开的行上"附着"生成**
 
 自增组按行推进一次，随机组按行采样一次，不变组填充常量，派生组/引用组按依赖顺序计算。它们**不放大**行数，只决定这些行上其余字段取什么值。
 
 ```
                      ┌──────── 组（字段） ────────┐
- 行数 =  Π  |枚举组取值集|      ×      基数倍数
-         └ 笛卡尔积 ┘                  └ 来自父表的 1:N 关系，可选
+ 行数 =  Π  |有限取值组取值集|      ×      基数倍数
+         └ 笛卡尔积 ┘                    └ 来自父表的 1:N 关系，可选
 ```
 
 **展开示例** —— 一张账户表，字段分成 3 个枚举组 + 若干非枚举组：
@@ -107,7 +116,7 @@ tableseed 用三层结构描述一份造数配置：
 
 这 12 条各自的 `acct_no` 由自增组推进、`balance` 由随机组采样、`tenant_id` 由不变组恒定填充、`amount` 由派生组计算。
 
-### 4. 规模治理
+## 1.4 规模治理
 
 笛卡尔积是有意为之的"覆盖放大器"，但组合数会指数增长，因此必须可控：
 
@@ -116,35 +125,162 @@ tableseed 用三层结构描述一份造数配置：
 | `max_rows` | 硬上限，超出即报错而非静默截断 |
 | `exclude` | 声明非法组合并剔除。例：`status_code == "03" and balance > 0`（已销户不该有余额） |
 | `strategy: full` | 全组合（默认）。适合中小规模，覆盖可证明 |
-| `strategy: pairwise` | 两两组合覆盖。组合爆炸时用最少的行数覆盖所有字段对的取值，性价比最高 |
+| `strategy: pairwise` | 两两组合覆盖。组合爆炸时用最少的行数覆盖所有字段对的取值 |
 | `strategy: sample(n)` | 从全组合中抽样 n 条，并输出「未覆盖组合清单」 |
 
 无论用哪种策略，`tableseed plan` 都会先算出**理论组合总数**并打印出来，让人在做之前就知道要造多少行。
 
-### 5. 多表下的展开作用域（设计要点）
+---
 
-子表同时受"父表 1:N 关系"和"自身枚举组"影响，需要明确展开次序：
+# 模型二：表间关系（Relation）
 
-| 作用域 | 语义 | 行数 |
-| --- | --- | --- |
-| `per_parent` | 每条父行都完整覆盖子表枚举组合 | 父行数 × 子表组合数 |
-| `global` | 子表枚举组合在全表范围内展开一次，再分配到各父行 | 子表组合数 × 基数 |
+多表造数的难点不在"循环生成"，而在**字段如何对得上**与**行数如何配得齐**。
 
-默认 `per_parent`（覆盖更彻底），可按表覆写。
+## 2.1 关系四要素
 
-## 生成流程
-
-```mermaid
-flowchart LR
-    A[元数据扫描<br/>主键/唯一/非空/外键] --> B[分组装配与校验<br/>字段不重不漏]
-    B --> C[依赖分析<br/>表间拓扑排序 + 组间依赖]
-    C --> D[规模预演<br/>plan：组合数 / 行数]
-    D --> E[逐表生成<br/>枚举组笛卡尔积<br/>非枚举组附着]
-    E --> F[一致性自检<br/>外键 / 唯一 / 约束]
-    F --> G[输出<br/>SQL / CSV / 直连入库]
+```yaml
+relations:
+  - parent: t_txn                 # 父表
+    child: t_txn_detail           # 子表
+    cardinality: 1:1              # ① 基数
+    existence: required           # ② 存在性
+    join: [[txn_no, txn_no]]      # ③ 关联锚点
+    propagate: [ ... ]            # ④ 字段传播规则
 ```
 
-## 配置样例（草案，字段名待定）
+**① 基数（cardinality）** 决定行数关系：
+
+| 基数 | 语义 | 子表行数 | 例子 |
+| --- | --- | --- | --- |
+| `1:1` | 一一对应（主表 + 扩展表） | 等于父行数 | 交易表 + 交易详情表 |
+| `1:0..1` | 可选扩展 | ≤ 父行数 | 只有转账交易才有对手行信息 |
+| `1:N` | 一对多 | Σ 每个父行的 N | 交易表 + 交易流水明细 |
+| `N:M` | 多对多 | 中间表 = 两父表行的组合取样 | 客户 × 产品 |
+
+**② 存在性（existence）** 决定子行是否必然出现：
+
+| 取值 | 语义 |
+| --- | --- |
+| `required` | 父有行则子必有行（默认） |
+| `optional` | 随机决定有无，行数在 0~N 间波动 |
+| `conditional` | 满足条件才有，条件表达式可引用父表字段 |
+
+**③ 关联锚点（join）** 定义两表如何配对，同时完成主键/外键传播：
+
+- 主键传播：`[[id, txn_id]]`，子表外键由父表主键派生；
+- 业务键关联：`[[txn_no, txn_no]]`，用业务唯一键而非主键；
+- 复合键：`[[branch_no, branch_no], [txn_date, txn_date], [seq_no, seq_no]]`。
+
+**④ 字段传播（propagate）** 见下节。
+
+## 2.2 字段传播的六种模式
+
+「很多字段要对得上」不是一条规则，而是六种，必须分别声明：
+
+| 模式 | 语义 | 阶段 | 例 |
+| --- | --- | :---: | --- |
+| `copy` | 父字段原值照抄到子字段 | P1 | `currency`、`txn_date`、`acct_no` 两表一致 |
+| `derive` | 父字段经表达式/函数变换后写入子字段 | P1 | `detail_amt = parent.amount × 0.7` |
+| `map` | 父表码值经映射表转换为子表码值 | P1 | 父 `txn_type` → 子 `detail_type` |
+| `split` | 父的一个值拆分到 N 个子行，满足 Σ子 = 父 | P1 | 一笔 1000 拆成 3 笔明细，合计仍是 1000 |
+| `aggregate` | **反向**：父字段由子表汇总得出 | **P2** | 父 `detail_count` = 子表行数 |
+| `free` | 子表自由生成，仅受自身分组规则约束 | P1 | 备注、随机附言 |
+
+```yaml
+propagate:
+  - {mode: copy,    from: txn_date, to: txn_date}
+  - {mode: copy,    from: acct_no,  to: acct_no}
+  - {mode: copy,    from: currency, to: currency}
+  - {mode: derive,  to: detail_amt, expr: "src.amount * 0.7"}
+  - {mode: map,     from: txn_type, to: detail_type, table: map_txn_type}
+  - {mode: free,    to: remark}
+```
+
+## 2.3 1:1 关系下的覆盖分配 ⚠️
+
+**这是最容易踩的坑。** 模型一规定"有限取值组之间做笛卡尔积"，但 1:1 关系锁定了子表行数 = 父表行数。若子表有个 3 取值的枚举组，笛卡尔积会把子表撑成 `父行数 × 3`，**基数当场就破**。
+
+因此 1:1 下，子表的有限取值组改用**分配策略（allocation）**：
+
+| 分配策略 | 语义 | 适用 |
+| --- | --- | --- |
+| `follow_parent` | 取值由父行决定（父枚举驱动子枚举） | **默认**。真实感优先：存款交易不可能「透支」 |
+| `round_robin` | 在父行序列上轮转分配，100 行 3 取值 → 33/33/34 | 父未给约束时的兜底；行数不变但覆盖度仍可保证 |
+| `random` | 随机分配 | 贴近生产数据的随机性 |
+| `weighted` | 按权重分布分配 | 少量异常值（如 5% 冲正） |
+
+**一句话概括这个分水岭**：
+
+> 笛卡尔积是「放大行数换覆盖」，分配是「固定行数内保覆盖」。1:N 用前者，1:1 只能用后者。
+
+## 2.4 条件枚举：父约束子
+
+分组模型向表间延伸的关键一步 —— **组的取值集是动态的，可随父行变化**：
+
+```yaml
+- type: enum
+  name: g_detail_status
+  fields: [detail_status]
+  when: "parent.txn_type == 'WITHDRAW'"        # 只在取款交易下生效
+  allocation: follow_parent
+  values: [["NORMAL"], ["OVERDRAFT"], ["REVERSED"]]
+```
+
+配合 `follow_parent`，父表 `txn_type` 的取值会驱动子表 `detail_status` 的取值集，造出的数据天然符合业务语义。
+
+## 2.5 两阶段生成
+
+`aggregate` 模式会在依赖图上形成**回边**（父 ← 子），因此生成分成两个阶段：
+
+- **Phase 1 · 正向生成**：按表间拓扑序，父 → 子，完成 `copy` / `derive` / `map` / `split` / `free`；
+- **Phase 2 · 反向回填**：按锚点聚合子表结果，更新父表的 `aggregate` 字段。
+
+```yaml
+# 父表侧的汇总字段
+- type: aggregate
+  name: g_detail_count
+  fields: [detail_count]
+  expr: "count(t_txn_detail) by txn_no"
+```
+
+典型场景：A 的交易金额合计 = B 的明细之和；银行余额表由流水汇总得出。
+
+## 2.6 多表链与多父
+
+- **链式传播**：A → B → C，沿 DAG 逐级传播，C 可继承 A 的字段（`copy` 支持跨级引用）；
+- **多父表**：B 同时引用 A 与 D，需保证 B 的每个外键在各自父表中都能找到（**引用完整性** —— `ref` 组只能从父表已生成的行里取值，不得凭空造）；
+- **N:M 中间表**：本质是「两个父表行的组合取样」，可复用笛卡尔积机制后按 `sample` / 上限裁剪。
+
+## 2.7 不变量：把「对得上」变成可校验的断言
+
+传播规则只保证生成时对，还要能证明对：
+
+```yaml
+invariants:
+  - "每个 t_txn.txn_no 在 t_txn_detail 中恰好 1 行"
+  - "t_txn_detail.currency == t_txn.currency by txn_no"
+  - "t_txn.detail_count == count(t_txn_detail) by txn_no"
+  - "Σ t_txn_detail.detail_amt by txn_no == t_txn.amount"
+```
+
+生成结束后逐条求值，失败即报错并列出违例行 —— **先声明口径，再验证口径**。
+
+---
+
+# 生成流程
+
+```mermaid
+flowchart TB
+    A[元数据扫描<br/>主键/唯一/非空/外键] --> B[分组装配与校验<br/>字段不重不漏]
+    B --> C[依赖分析<br/>表间拓扑排序 + 回边识别]
+    C --> D[规模预演 plan<br/>组合数 / 行数 / 依赖序]
+    D --> E[Phase 1 正向生成<br/>父→子：copy/derive/map/free]
+    E --> F[Phase 2 反向回填<br/>子→父：aggregate]
+    F --> G[不变量校验 invariants]
+    G --> H[输出<br/>SQL / CSV / 直连入库]
+```
+
+# 配置样例（草案，字段名待定）
 
 ```yaml
 seed: 20260910                      # 固定随机种子，结果可复现
@@ -155,11 +291,53 @@ limits:
   exclude:
     - "t_account.status_code == '03' and t_account.balance > 0"
 
+relations:
+  - parent: t_txn
+    child: t_txn_detail
+    cardinality: 1:1
+    existence: required
+    join: [[txn_no, txn_no]]
+    propagate:
+      - {mode: copy,   from: txn_date, to: txn_date}
+      - {mode: copy,   from: acct_no,  to: acct_no}
+      - {mode: copy,   from: currency, to: currency}
+      - {mode: derive, to: detail_amt, expr: "src.amount * 0.7"}
+      - {mode: map,    from: txn_type, to: detail_type, table: map_txn_type}
+      - {mode: free,   to: remark}
+
+invariants:
+  - "每个 t_txn.txn_no 在 t_txn_detail 中恰好 1 行"
+  - "t_txn_detail.currency == t_txn.currency by txn_no"
+
 tables:
-  - name: t_account
-    scope: per_parent
+  - name: t_txn
     groups:
-      # ── 枚举组：组内多字段联合取值 ──
+      - type: enum
+        name: g_txn_type
+        fields: [txn_type]
+        values: [["DEPOSIT"], ["WITHDRAW"], ["TRANSFER"]]
+
+      - type: sequence
+        name: g_txn_no
+        fields: [txn_no]
+        format: "T{seq:08d}"
+
+      - type: aggregate
+        name: g_detail_count
+        fields: [detail_count]
+        expr: "count(t_txn_detail) by txn_no"
+
+  - name: t_txn_detail
+    groups:
+      - type: enum
+        name: g_detail_status
+        fields: [detail_status]
+        when: "parent.txn_type == 'WITHDRAW'"
+        allocation: follow_parent
+        values: [["NORMAL"], ["OVERDRAFT"], ["REVERSED"]]
+
+  - name: t_account
+    groups:
       - type: enum
         name: g_status
         fields: [status_code, status_desc]
@@ -177,7 +355,6 @@ tables:
         fields: [channel]
         values: [["OTC"], ["EBANK"], ["MOBILE"]]
 
-      # ── 非枚举组：在每条展开行上附着 ──
       - type: sequence
         name: g_acct_no
         fields: [acct_no]
@@ -202,71 +379,52 @@ tables:
         name: g_amt
         fields: [amount]
         expr: "balance * 0.01"
-
-  - name: t_txn
-    relation:
-      parent: t_account
-      foreign_key: acct_no
-      cardinality: [1, 3]             # 每个账户 1~3 笔交易
-    groups:
-      - type: enum
-        name: g_txn_type
-        fields: [txn_type]
-        values: [["DEPOSIT"], ["WITHDRAW"], ["TRANSFER"]]
-
-      - type: ref
-        name: g_ref_acct
-        fields: [acct_no]
-        from: t_account.acct_no
-
-      - type: sequence
-        name: g_txn_no
-        fields: [txn_no]
-        format: "T{seq:08d}"
 ```
 
-## CLI 草案
+# CLI 草案
 
 ```bash
-tableseed plan  -c seed.yaml              # 预演：打印各表组合数/行数/依赖序，不产出数据
-tableseed check -c seed.yaml              # 校验配置：分组是否不重不漏、有无依赖环、组合规模
-tableseed gen   -c seed.yaml -o out/      # 生成 SQL / CSV
-tableseed gen   -c seed.yaml --dsn ...    # 直连数据库批量入库
-tableseed gen   -c seed.yaml --strategy pairwise   # 覆盖策略覆盖写
+tableseed plan   -c seed.yaml             # 预演：打印各表组合数/行数/依赖序，不产出数据
+tableseed check  -c seed.yaml             # 校验配置：分组不重不漏、依赖无环、关系完整、组合规模
+tableseed gen    -c seed.yaml -o out/     # 生成 SQL / CSV
+tableseed gen    -c seed.yaml --dsn ...   # 直连数据库批量入库
+tableseed verify -c seed.yaml -i out/     # 对生成结果跑 invariants 校验
 ```
 
 `plan` 示例输出：
 
 ```
-t_account   枚举组: g_status(2) × g_currency(2) × g_channel(3) = 12 组合  → 12 行
-t_txn       枚举组: g_txn_type(3) = 3 组合 × 每父行 1~3 笔 ≈ 24 行
-组合总数 36，未超 max_rows(100000)                              ✓ 校验通过
+t_txn         枚举组: g_txn_type(3) = 3 组合                     → 3 行
+t_txn_detail  1:1 绑定 t_txn，行数锁定 3 行（allocation: follow_parent）
+t_account     枚举组: g_status(2) × g_currency(2) × g_channel(3) = 12 组合 → 12 行
+组合总数 15，未超 max_rows(100000)                              ✓ 校验通过
 ```
 
-## 设计原则
+# 设计原则
 
 1. **声明式** —— 规则写在配置里，不写脚本；配置可 diff、可评审、可版本化。
-2. **可证明的覆盖** —— 枚举组合数可计算，造出多少复合多少、漏了哪些说得清。
+2. **覆盖可证明** —— 组合数可计算，造出多少、漏了哪些说得清。
 3. **组是原子的** —— 同组字段共进退，杜绝组内不同步。
-4. **只读元数据** —— 不写目标库结构，只读表定义。
-5. **可复现** —— 同配置 + 同 seed = 同数据。
+4. **覆盖方式随行数形态而变** —— 有空间就笛卡尔积放大，没空间就分配保覆盖。
+5. **只读元数据** —— 不写目标库结构，只读表定义。
+6. **可复现** —— 同配置 + 同 seed = 同数据。
 
-## Roadmap
+# Roadmap
 
 - [ ] **M1** 元数据扫描 + 分组模型 + 单表笛卡尔积展开 + SQL 输出（CLI）
-- [ ] **M2** 全部组类型实现 + 多表关联拓扑排序 + 外键传播
-- [ ] **M3** 覆盖策略（pairwise / sample）+ `plan` 预演 + `check` 校验
-- [ ] **M4** 直连入库 + 生成后自检（外键 / 唯一 / 业务约束）
+- [ ] **M2** 表间关系：四要素 + `copy`/`derive`/`map`/`free` 传播 + 拓扑排序 + 1:1 分配策略
+- [ ] **M3** `aggregate` 两阶段生成 + `invariants` 校验 + 覆盖策略（pairwise / sample）+ `plan`/`check`
+- [ ] **M4** `split` 拆分模式 + 直连入库 + 生成后自检
 - [ ] **M5** 可视化配置界面（表关联图 + 分组拖拽 + 覆盖度热力图）
 
-## 技术选型（待定）
+# 技术选型（待定）
 
 - 主语言：Python 3.13
 - CLI：Typer
 - 数据库适配：PostgreSQL / MySQL / Oracle 兼容层（方言隔离）
 - 可选前端：React + Vite（M5）
 
-## 状态
+# 状态
 
 项目刚立项，骨架待搭建。当前仓库只有这份 README。
 
