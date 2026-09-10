@@ -23,36 +23,52 @@
 | 测试 | **pytest + allure** | 与既有项目栈一致；allure 中文用例便于评审 | unittest（样板多） |
 | 依赖管理 | **venv + requirements.txt** | 与既有项目一致，Windows 环境无额外心智负担 | Poetry / uv（团队认知成本） |
 | 输出 | **自研 SQL 生成 + 标准库 CSV + 驱动批量写入** | SQL 方言差异大，模板可控 | SQLAlchemy ORM（为造数引入 ORM 过重） |
+| WebUI 后端 | **FastAPI + uvicorn** | 与既有项目栈一致；原生支持 SSE 流式进度；pydantic v2 与配置校验复用同一套模型 | Flask（异步与流式支持弱）、Streamlit（配置编辑与表格控制力不足） |
+| WebUI 前端 | **React 19 + Vite + TypeScript + Tailwind v4** | 与既有项目同栈，可复用组件经验与设计规范 | Jinja + 原生 JS（编辑器与表格体验差）、Vue（与既有栈不一致） |
+| 实时进度 | **SSE（Server-Sent Events）** | 生成进度是单向推送，SSE 比 WebSocket 简单且无握手协议 | WebSocket（双向能力用不上，复杂度更高） |
+| DataFrame 导出 | **pandas 作可选依赖（惰性导入）** | 用户明确需要 DataFrame 形态；但不强制安装，核心返回自有内存对象 | 强制依赖（拖慢安装与启动）、仅返回 list[dict]（不便分析） |
+| 只读 SQL 网关 | **M1 正则前缀判定 → M2 引入 sqlglot 解析语句类型** | 需要可靠判断语句类别以落实只读；M1 不引依赖，正则兜底，M2 加固 | 仅 `startswith`（易被注释绕过，仅作 M1 过渡） |
 | 日志 | **标准库 logging + Rich（进度条）** | 零侵入，CLI 体验好 | print（无法分级） |
-| 可选前端 | **React 19 + Vite + TypeScript + Tailwind**（M5） | 与既有项目栈一致 | — |
 
-**明确不引入**：pandas（大行数内存压力）、numpy（除随机分布外无必要）、任何 ORM、任何代码生成。
+**明确不引入**：任何 ORM、任何代码生成、前端 UI 组件库（Tailwind 手写保持轻量）。pandas 与 sqlglot 按可选依赖处理，函数内惰性导入。
 
 ## 2. 架构分层
 
 ```
-┌─────────────────────────────────────────────┐
-│  cli.py            Typer 子命令：plan/check/gen/verify  │
-├─────────────────────────────────────────────┤
-│  config/           加载 YAML → 校验 → IR 对象             │
-│  metadata/         元数据扫描（DDL/反射/手工）与类型映射   │
-├─────────────────────────────────────────────┤
-│  plan/             依赖图 → 拓扑排序 → 规模预演            │
-├─────────────────────────────────────────────┤
-│  engine/           生成引擎（P1 正向 / P2 回填）           │
+┌──────────────────────────────────────────────────────┐
+│  cli.py        Typer 子命令：plan / check / gen / verify / ui │
+├──────────────────────────────────────────────────────┤
+│  web/          FastAPI：REST API + SSE 进度 + SQL 查询台   │
+├──────────────────────────────────────────────────────┤
+│  service.py    对 CLI 与 WebUI 统一暴露的业务入口          │
+├──────────────────────────────────────────────────────┤
+│  config/       加载 YAML → 校验 → IR 对象                 │
+│  metadata/     元数据扫描（DDL/反射/手工）与类型映射       │
+├──────────────────────────────────────────────────────┤
+│  plan/         依赖图 → 拓扑排序 → 规模预演                │
+├──────────────────────────────────────────────────────┤
+│  engine/       生成引擎（P1 正向 / P2 回填）               │
 │   ├ group_expander  有限取值组笛卡尔积展开                  │
 │   ├ allocator       1:1 分配策略                            │
 │   ├ propagator      表间字段传播                            │
 │   └ aggregator      P2 汇总回填                             │
-├─────────────────────────────────────────────┤
-│  expr/             表达式解析与沙箱求值（全局复用）        │
-├─────────────────────────────────────────────┤
-│  output/           SQL / CSV / 直连入库                    │
-│  verify/           invariants 校验 + 覆盖报告              │
-└─────────────────────────────────────────────┘
+├──────────────────────────────────────────────────────┤
+│  expr/         表达式解析与沙箱求值（全局复用）            │
+├──────────────────────────────────────────────────────┤
+│  sink/         执行策略分派（结果去向）                    │
+│   ├ db_sink       提供连接 → 直接执行入库                   │
+│   ├ memory_sink   无连接 → 只生成不落盘，返回内存对象        │
+│   └ file_sink     显式 --out → 落盘 SQL / CSV               │
+├──────────────────────────────────────────────────────┤
+│  verify/       invariants 校验 + 覆盖报告                  │
+└──────────────────────────────────────────────────────┘
 ```
 
-**依赖方向**：上层依赖下层，`expr` 与 `models` 被所有层引用但不反向依赖。`engine` 不碰 IO（流式由 `output` 拉取），保证 NFR-5 可单测。
+**三个关键架构决策**：
+
+1. **`service.py` 是唯一业务入口** —— CLI 与 WebUI 都只调用它，不各自实现逻辑。避免"CLI 能跑但页面结果不一致"这类分叉。
+2. **`sink/` 抽象取代原来的 `output/`** —— 结果的去向是一个可替换的策略（入库 / 内存 / 落盘），生成引擎不关心数据最终去哪。这是 D-5「按连接有无分派」在架构上的落点。
+3. **`engine` 不碰 IO** —— 引擎只产出 `TableData` 内存对象，由 `sink` 消费。既保证可单测（NFR-5），也让"不落盘"成为默认行为（NFR-8）。
 
 ## 3. 目录结构
 
@@ -69,6 +85,7 @@ tableseed/
 ├── src/tableseed/
 │   ├── __init__.py
 │   ├── cli.py                  # Typer 入口
+│   ├── service.py              # CLI 与 WebUI 共用的业务入口（唯一逻辑出口）
 │   ├── errors.py               # ConfigError / ExprError / PlanError
 │   ├── models.py               # 全部 IR 数据结构（pydantic）
 │   ├── rng.py                  # 种子化随机源
@@ -94,15 +111,35 @@ tableseed/
 │   │   ├── allocator.py        # 分配策略
 │   │   ├── propagator.py       # 表间传播
 │   │   └── aggregator.py       # P2 回填
-│   ├── output/
-│   │   ├── sql.py
-│   │   ├── csv.py
-│   │   └── db.py
+│   ├── sink/
+│   │   ├── base.py             # Sink 抽象（write(TableData)）
+│   │   ├── db.py               # db_sink：直连批量入库
+│   │   ├── memory.py           # memory_sink：内存对象 + to_dataframe() 等导出
+│   │   └── files.py            # file_sink：SQL / CSV 落盘
+│   ├── web/
+│   │   ├── app.py              # FastAPI 实例、静态文件挂载、启动入口
+│   │   ├── routes_config.py    # 配置读写与校验
+│   │   ├── routes_run.py       # plan / gen + SSE 进度
+│   │   ├── routes_sql.py       # SQL 查询台
+│   │   └── security.py         # 只读白名单、绑定地址校验
 │   └── verify/
 │       ├── invariants.py
 │       └── coverage.py
+├── frontend/                   # React 19 + Vite + TS + Tailwind v4
+│   ├── package.json
+│   ├── vite.config.ts
+│   └── src/
+│       ├── App.tsx
+│       ├── api/client.ts       # 后端接口封装
+│       ├── components/
+│       └── pages/
+│           ├── ConfigEditor.tsx    # YAML 编辑 + 实时校验
+│           ├── PlanView.tsx        # 预演结果
+│           ├── ResultView.tsx      # 生成结果表格预览
+│           └── SqlConsole.tsx      # SQL 查询台
 └── tests/
     ├── unit/
+    ├── web/                    # API 测试（FastAPI TestClient）
     └── e2e/
 ```
 
@@ -189,12 +226,27 @@ class LimitsSpec(BaseModel):
     exclude: list[str] = []
 
 
+class DatabaseSpec(BaseModel):
+    url: str | None = None                       # None → 内存模式（只生成不落盘）
+    dialect: str | None = None                   # 不填则从 url 推断
+    batch_size: int = 1000
+    dry_run: bool = False
+
+
+class SqlSpec(BaseModel):
+    allow_write: bool = False                    # 写模式默认关闭
+    max_rows: int = 1000
+    timeout_seconds: int = 30
+
+
 class SeedConfig(BaseModel):
     seed: int = 20260910
     limits: LimitsSpec = LimitsSpec()
     tables: list[TableSpec]
     relations: list[RelationSpec] = []
     invariants: list[str] = []
+    database: DatabaseSpec | None = None
+    sql: SqlSpec = SqlSpec()
 ```
 
 **运行时对象**（`engine` 内部，非配置）：
@@ -293,17 +345,47 @@ for table in phase2_targets:
 
 ### 6.1 语法（统一一套，供 when / exclude / derive / aggregate / invariants 使用）
 
-| 能力 | 语法 | 说明 |
+**风格取向（D-3）**：运算符与关键字**同时接受 Python 与 MySQL 两种写法**，大小写不敏感；函数提供双风格别名。目标用户写 SQL 多、写 Python 少，两套都认可以降低记忆负担。
+
+| 能力 | 接受的写法 | 说明 |
 | --- | --- | --- |
-| 比较 | `==` `!=` `>` `>=` `<` `<=` | Python 风格，不用 `=` |
-| 逻辑 | `and` `or` `not` | 不支持 `&` `|` |
-| 算术 | `+ - * / // % **` | — |
-| 成员 | `in` `not in` | 如 `channel in ("OTC", "EBANK")` |
-| 变量 | `字段名` / `row.字段名` / `parent.字段名` / `src.字段名` / `seq` | 按上下文注入 |
-| 函数 | `abs` `round` `len` `upper` `lower` `substr` `today` `days_ago` `rand_int` `dict` `coalesce` | 白名单注册 |
+| 比较 | `==` / `=`（兼容）/ `!=` / `<>` / `>` `>=` `<` `<=` | `=` 与 `<>` 为 MySQL 习惯写法，内部归一化处理 |
+| 逻辑 | `and` / `AND`、`or` / `OR`、`not` / `NOT` | 不支持 `&&` `||` `&` `|` |
+| 算术 | `+ - * / // % **` | `div` 视为 `//` 别名 |
+| 成员 | `in` / `not in` | 如 `channel in ("OTC", "EBANK")` |
+| 空值 | `is null` / `is not null` | MySQL 习惯；同时提供 `isnone(x)` |
+| 区间 | `between a and b` | 等价于 `a <= x <= b` |
+| 模糊匹配 | `like` | 支持 `%` 与 `_` 通配，如 `remark like "TXN-%"` |
+| 字符串拼接 | `+` 或 `concat(a, b)` | `||` 不作为拼接符（与逻辑 or 易混，明确拒绝） |
+| 变量 | `字段名` / `row.字段名` / `parent.字段名` / `src.字段名` / `seq` / `seed` | 按上下文注入 |
 | 聚合 | `count(x) by k` / `sum(x) by k` / `avg` `min` `max` `count_distinct` | 仅 `aggregate` 与 `invariants` 可用 |
 
-### 6.2 安全实现（NFR-3）
+### 6.2 函数库（Python 名 / MySQL 名双别名）
+
+| 类别 | 函数 | MySQL 别名 |
+| --- | --- | --- |
+| 空值 | `coalesce` `nullif` | `ifnull` `nvl` |
+| 数值 | `abs` `round` `ceil` `floor` `mod` `power` `greatest` `least` | 同名 |
+| 字符串 | `length` `upper` `lower` `trim` `ltrim` `rtrim` `substr` `replace` `concat` | `char_length` `ucase` `lcase` |
+| 日期 | `now` `today` `date_add` `date_sub` `datediff` `date_format` `year` `month` `day` | `curdate` `curtime` `date_add` `date_sub` `timestampdiff` |
+| 条件 | `if_(cond, a, b)` | `if` |
+| 造数专用 | `seq()` `rand_int(a,b)` `rand_choice([...])` `rand_decimal(a,b,s)` `dict_(name)` `uuid_()` | — |
+| 聚合 | `count` `sum` `avg` `min` `max` `count_distinct` | 同名 |
+
+**造数专用函数说明**：
+
+| 函数 | 用途 |
+| --- | --- |
+| `seq()` | 当前行序号（等价于变量 `seq`） |
+| `rand_int(a, b)` | 区间内随机整数，受全局 seed 控制 |
+| `rand_choice([...])` | 从候选集中随机取一个（可带权重） |
+| `rand_decimal(a, b, s)` | 区间内随机小数，保留 `s` 位 |
+| `dict_(name)` | 从注册字典中取值 |
+| `uuid_()` | 生成确定性 UUID（同 seed 同结果，保证可复现） |
+
+> 命名用下划线后缀（`if_` / `dict_` / `uuid_`）避开 Python 关键字 —— 这类函数名会被解析为普通标识符，若与关键字冲突则在解析期报错而非静默出错。
+
+### 6.3 安全实现（NFR-3）
 
 ```python
 ALLOWED_NODES = (
@@ -343,17 +425,105 @@ def compile_expr(src: str) -> ast.Expression:
 
 **DDL 来源解析**：优先用 SQLAlchemy 反射（连接可用时）；离线场景用 `sqlglot` 解析 DDL 语句（仅 M2 引入，M1 仅支持反射 + 手工声明，避免过早引入依赖）。
 
-## 8. 输出层
+## 8. 执行与输出层（sink）
 
-| 目标 | 实现要点 |
-| --- | --- |
-| SQL | 按方言生成批量 INSERT，默认 1000 行/语句；字符串转义与日期字面量按方言处理 |
-| CSV | 每表一文件，UTF-8 with BOM（兼容 Excel 打开），表头为字段名 |
-| 直连入库 | 驱动 executemany + 分批 commit；**写入前校验目标表存在且字段匹配** |
+三种 sink，按 D-5 决策分派：
 
-**输出顺序**：严格按 `phase1_order`（父表先于子表），保证直接执行 SQL 不会触发外键错误（FR-8.4）。
+| sink | 触发条件 | 行为 | 磁盘副作用 |
+| --- | --- | --- | --- |
+| `db_sink` | 提供数据库连接（`--dsn` 或配置 `database.url`） | 批量 INSERT + 分批 commit；写入前校验目标表存在且字段匹配；`--dry-run` 时只生成不写 | 无 |
+| `memory_sink` | **默认**（未提供连接） | 只生成，返回 `TableData` 内存对象 | **无** |
+| `file_sink` | 显式 `--out <dir>` | 落盘 SQL / CSV | 有（显式触发） |
 
-## 9. 配置 Schema 完整字段表
+**分派优先级**：`--out` > `--dsn` > memory（二者都不给即内存模式）。`--out` 与 `--dsn` 可同时使用（既入库又留档）。
+
+**内存对象的导出形态**（FR-8.3）：
+
+```python
+result = service.generate(config)              # 无连接 → memory_sink
+result.tables["t_account"].to_dataframe()      # pandas（惰性导入）
+result.tables["t_account"].to_records()        # list[dict]，零依赖
+result.tables["t_account"].to_sql(dialect="mysql")
+result.tables["t_account"].to_csv(path=None)   # path=None 时返回字符串
+```
+
+**落盘格式**：
+- SQL：按方言生成批量 INSERT（默认 1000 行/语句）
+- CSV：每表一文件，UTF-8 with BOM（兼容 Excel），表头为字段名
+- 落盘与入库顺序严格按 `phase1_order`（父表先于子表），保证直接执行不触发外键错误（FR-8.5）
+
+## 9. WebUI 设计
+
+### 9.1 形态与启动
+
+```bash
+tableseed ui -c samples/account.yaml                     # 启动并载入配置
+tableseed ui -c samples/account.yaml --port 8643 --no-browser
+```
+
+后端 FastAPI 监听 `127.0.0.1`（NFR-7），前端构建产物由同一进程托管为静态文件 —— 单端口、无跨域。开发期前端走 Vite dev server 代理到后端。
+
+### 9.2 页面与接口
+
+| 页面 | 主要能力 | 对应接口 |
+| --- | --- | --- |
+| 配置编辑器 | YAML 编辑、语法高亮、实时校验、错误定位到行 | `GET/PUT /api/config`、`POST /api/config/validate` |
+| 预演视图 | 各表组合数 / 行数 / 依赖序 / 超限提示 | `POST /api/plan` |
+| 生成与结果预览 | 触发生成、SSE 进度、结果表格分页筛选、一键导出 | `POST /api/generate`（SSE）、`GET /api/result/{table}`、`GET /api/export` |
+| SQL 查询台 | 执行查询、表格渲染、快捷查看最新插入 | `POST /api/sql/execute`、`GET /api/sql/recent/{table}` |
+| 关系图（M2） | 父子关系与锚点连线 | `GET /api/graph` |
+| 覆盖度（M3） | 覆盖率与未覆盖清单 | `GET /api/coverage` |
+
+### 9.3 生成进度（SSE）
+
+```
+event: progress
+data: {"table": "t_account", "done": 6, "total": 12, "phase": "P1"}
+
+event: done
+data: {"tables": {"t_account": 12, "t_txn_detail": 3}, "elapsed_ms": 42}
+```
+
+前端用一个 `EventSource` 订阅，进度条与结果表格增量刷新。
+
+### 9.4 结果预览的数据来源
+
+- **无数据库连接**：直接读内存生成结果
+- **有数据库连接**：默认仍读内存生成结果（不重复查库），另提供「从库中读回」按钮作交叉验证
+
+> 这一点很重要 —— 预览默认展示**生成器产出的数据**，而不是查询结果。避免"页面看着对了、入库其实错了"的假象；入库是否成功由 SQL 查询台交叉验证。
+
+## 10. SQL 查询台与安全
+
+### 10.1 只读白名单（NFR-7 / FR-12.2）
+
+| 语句类别 | M1 判定方式 | 结论 |
+| --- | --- | --- |
+| `SELECT` / `WITH` / `SHOW` / `EXPLAIN` / `DESC` / `DESCRIBE` | 去注释去空白后取首个关键字，比对白名单 | 放行 |
+| 其余（`INSERT` / `UPDATE` / `DELETE` / `DROP` / `ALTER` / `TRUNCATE` / `GRANT` / `CREATE` …） | — | 拒绝并说明原因 |
+
+**M1 实现**：正则前缀判定（零依赖）。
+**M2 加固**：引入 `sqlglot` 解析语句 AST 判定类型，防住 `/* */` 注释绕过与 `;` 多语句拼接等手法。
+
+### 10.2 保护措施
+
+| 措施 | 参数 | 默认值 |
+| --- | --- | --- |
+| 返回行数上限 | `sql.max_rows` | 1000 |
+| 查询超时 | `sql.timeout_seconds` | 30 |
+| 写模式开关 | `sql.allow_write` | `false` |
+| 写模式二次确认 | 页面弹窗需输入 `EXECUTE` 确认 | 强制 |
+| 绑定地址 | 固定 `127.0.0.1`，不支持改为 `0.0.0.0` | 强制 |
+
+### 10.3 写模式的定位
+
+写模式是**逃生舱**，仅用于「造数后手工修正几条数据」这类场景，必须显式开启 + 逐次确认，且开启时页面顶部常驻警示条。默认关闭。
+
+### 10.4 执行留痕（FR-12.7，M2）
+
+每次执行记录：时间、语句摘要、耗时、返回或影响行数，落本地日志文件。
+
+## 11. 配置 Schema 完整字段表
 
 ### 顶层
 
@@ -364,6 +534,36 @@ def compile_expr(src: str) -> ast.Expression:
 | `tables` | list | **是** | — | 表定义 |
 | `relations` | list | 否 | `[]` | 表间关系 |
 | `invariants` | list[str] | 否 | `[]` | 生成后校验断言 |
+| `database` | object | 否 | — | 数据库连接；**不填则走内存模式（只生成不落盘）** |
+| `sql` | object | 否 | 见下 | SQL 查询台安全参数 |
+
+> **单文件约定（D-4）**：配置始终是**一个** YAML 文件，不拆分、不支持 `include`，便于直接发给同事。体量变大时用 YAML anchor / alias 复用公共片段：
+>
+> ```yaml
+> _common:
+>   tenant: &tenant ["0001", "001"]
+> tables:
+>   - name: t_account
+>     groups:
+>       - {type: const, name: g_tenant, fields: [tenant_id, branch_code], value: *tenant}
+> ```
+
+### database
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `url` | str | — | 连接串，如 `postgresql://user:pwd@host:5432/db`；命令行 `--dsn` 优先于此 |
+| `dialect` | enum | 从 url 推断 | `postgresql` / `mysql` / `oracle` |
+| `batch_size` | int | 1000 | 批量写入条数 |
+| `dry_run` | bool | `false` | 只生成不写库 |
+
+### sql
+
+| 字段 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `allow_write` | bool | `false` | 写模式开关；开启后仍需页面二次确认 |
+| `max_rows` | int | 1000 | 查询返回行数上限 |
+| `timeout_seconds` | int | 30 | 查询超时 |
 
 ### limits
 
@@ -398,31 +598,43 @@ def compile_expr(src: str) -> ast.Expression:
 | `join` | list | — | 锚点对，如 `[[txn_no, txn_no]]` |
 | `propagate` | list | `[]` | 传播规则 |
 
-## 10. 测试策略
+## 12. 测试策略
 
 | 层次 | 范围 | 要点 |
 | --- | --- | --- |
 | 单元测试 | `expr` / `group_expander` / `allocator` / `topo` / `sizing` | 纯内存，无 IO；边界：空取值集、单字段组、环检测 |
 | 安全测试 | `expr` 沙箱 | 注入 `__import__` / 属性逃逸 / 任意函数调用，必须全部拒绝 |
-| 端到端 | `samples/account.yaml` | 对应 PRD 第 7 节 AC-1 ~ AC-9 逐条断言 |
+| Web API 测试 | `web/` 路由 | FastAPI TestClient；**重点覆盖 SQL 白名单拒绝、`;` 多语句拼接、超限截断、写模式默认关闭** |
+| 无副作用断言 | `memory_sink` 路径 | 生成前后对比工作目录文件清单，必须完全一致（NFR-8 / AC-13） |
+| 端到端 | `samples/account.yaml` | 对应 PRD 第 7 节 AC-1 ~ AC-13 逐条断言 |
 | 黄金文件 | 同 seed 两次生成 | 字节级比对，保障 NFR-2 |
 | 方言测试 | SQL 输出 | 以字符串快照对比（不依赖真实数据库） |
 
 **覆盖率目标**：核心模块 ≥ 80%（NFR-5）。测试用例采用 allure 中文注解，便于评审。
 
-## 11. 开发环境与命令
+## 13. 开发环境与命令
 
 ```bash
-# 环境
+# 后端环境
 python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt      # Windows
+
+# 前端环境
+cd frontend && npm install
 
 # 常用命令
 pytest                                              # 全量测试
 pytest --alluredir=reports/allure                   # 生成 allure 报告
-tableseed plan  -c samples/account.yaml             # 预演
-tableseed check -c samples/account.yaml             # 校验
-tableseed gen   -c samples/account.yaml -o out/     # 生成
+tableseed plan -c samples/account.yaml              # 预演（终端）
+tableseed check -c samples/account.yaml             # 配置校验
+tableseed gen  -c samples/account.yaml              # 无连接 → 只生成不落盘
+tableseed gen  -c samples/account.yaml --dsn postgresql://...   # 直连入库
+tableseed gen  -c samples/account.yaml -o out/      # 显式落盘
+tableseed ui   -c samples/account.yaml              # 启动 WebUI
+
+# 前端开发（热更新）
+cd frontend && npm run dev                          # Vite dev server，代理到后端
+cd frontend && npm run build                        # 构建产物供 tableseed ui 托管
 ```
 
 **requirements.txt（预计）**
@@ -431,27 +643,48 @@ tableseed gen   -c samples/account.yaml -o out/     # 生成
 typer>=0.12
 pydantic>=2.7
 PyYAML>=6.0
-SQLAlchemy>=2.0          # 元数据反射（M1 可选，惰性导入）
 rich>=13.0               # CLI 进度与表格输出
+
+fastapi>=0.115           # WebUI 后端
+uvicorn>=0.30            # ASGI 服务器
+
+SQLAlchemy>=2.0          # 元数据反射（可选，惰性导入）
+pandas>=2.2              # DataFrame 导出（可选，惰性导入）
+sqlglot>=25.0            # SQL 语句类型判定（M2 引入，可选）
+
 pytest>=8.0
 allure-pytest>=2.13
+httpx>=0.27              # FastAPI TestClient 依赖
 ```
 
-> 遵循既有项目约定：**可选依赖在函数内惰性导入**，避免拖慢 CLI 启动与拖垮服务。
+> 遵循既有项目约定：**可选依赖（SQLAlchemy / pandas / sqlglot）在函数内惰性导入**，避免拖慢 CLI 启动。
+> 前端构建产物随包分发，使用者无需安装 Node —— `pip install` 后 `tableseed ui` 即可用。
 
-## 12. 实施顺序建议（M1 最短链路）
+## 14. 实施顺序建议（M1 最短链路）
 
-按"能跑通即验证"的顺序推进，每步都有可见产出：
+按"能跑通即验证"的顺序推进，每步都有可见产出，且从第 7 步起可在浏览器里看到东西：
 
-1. `models.py` + `config/loader.py` → 能加载并校验 YAML
+**后端骨架**
+
+1. `models.py` + `config/loader.py` + `config/checker.py` → 能加载并校验 YAML
 2. `expr/`（parser + evaluator + functions）→ 表达式可单测
-3. `engine/group_expander.py` → 12 行示例能展开出全部组合
+3. `engine/group_expander.py` → 12 行示例展开出全部组合
 4. `engine/table_gen.py` → 叠加附着组，产出完整行
-5. `output/sql.py` + `csv.py` → 落盘
-6. `cli.py`（plan / check / gen）→ 端到端可用
-7. `samples/account.yaml` + e2e 测试 → 对齐 PRD AC-1 ~ AC-9
+5. `sink/memory.py` + `sink/files.py` → 内存对象与落盘，`to_dataframe()` 可用
+6. `service.py` + `cli.py`（plan / check / gen）→ 终端端到端可用
 
-前六步可独立测试，第 7 步做总验收。
+**WebUI 闭环**（此段之后即可脱离终端验证）
+
+7. `web/app.py` + `routes_config.py` + `routes_run.py`（plan 部分）→ 页面能编辑配置并跑预演
+8. `frontend/` 配置编辑器 + 预演视图 → 浏览器可见
+9. `routes_run.py`（SSE 生成）+ 结果预览页 → 页面点击生成、表格查看
+10. `sink/db.py` + `routes_sql.py` + SQL 查询台页 → 入库后可直接查数据
+
+**收口**
+
+11. `samples/account.yaml` + e2e 测试 → 对齐 PRD AC-1 ~ AC-13
+
+第 1~6 步纯后端可独立测试；第 7~10 步每步都产生浏览器可见的成果；第 11 步做总验收。
 
 ---
 

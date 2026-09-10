@@ -32,6 +32,8 @@
 | 覆盖爆炸 | 想全组合覆盖，`4×3×5×8` 一乘就是几百上千行，人工排不动 |
 | 不可复现 | 随机造数每次结果不同，缺陷无法稳定重现 |
 | 状态跳跃 | 造出「已销户却仍有在途交易」这类业务上不可能存在的组合 |
+| 验证靠终端 | 改一行配置跑一次命令，看不见数据长什么样，排查全靠打印 |
+| 入库后看不见 | 想确认数据是否真进去了，还得切到数据库客户端另开一个窗口 |
 
 ---
 
@@ -394,10 +396,12 @@ tables:
 # CLI 草案
 
 ```bash
+tableseed ui     -c seed.yaml             # 启动 WebUI：配置、预演、生成、预览、查数据都在浏览器里
 tableseed plan   -c seed.yaml             # 预演：打印各表组合数/行数/依赖序，不产出数据
 tableseed check  -c seed.yaml             # 校验配置：分组不重不漏、依赖无环、关系完整、组合规模
-tableseed gen    -c seed.yaml -o out/     # 生成 SQL / CSV
-tableseed gen    -c seed.yaml --dsn ...   # 直连数据库批量入库
+tableseed gen    -c seed.yaml             # 无数据库连接 → 只生成不落盘，返回内存对象
+tableseed gen    -c seed.yaml --dsn ...   # 提供数据库连接 → 直接执行入库
+tableseed gen    -c seed.yaml -o out/     # 显式落盘 SQL / CSV
 tableseed verify -c seed.yaml -i out/     # 对生成结果跑 invariants 校验
 ```
 
@@ -421,22 +425,28 @@ t_account     枚举组: g_status(2) × g_currency(2) × g_channel(3) = 12 组�
 
 # Roadmap
 
-- [ ] **M1** 元数据扫描 + 分组模型 + 单表笛卡尔积展开 + SQL 输出（CLI）
-- [ ] **M2** 表间关系：四要素 + `copy`/`derive`/`map`/`free` 传播 + 拓扑排序 + 1:1 分配策略
-- [ ] **M3** `aggregate` 两阶段生成 + `invariants` 校验 + 覆盖策略（pairwise / sample）+ `plan`/`check`
-- [ ] **M4** `split` 拆分模式 + 直连入库 + 生成后自检
-- [ ] **M5** 可视化配置界面（表关联图 + 分组拖拽 + 覆盖度热力图）
+- [ ] **M1** 元数据扫描 + 分组模型 + 单表笛卡尔积展开 + 执行策略（直连/内存）+ CLI + **WebUI 最小闭环**（配置→预演→生成→预览）+ SQL 查询台
+- [ ] **M2** 表间关系：四要素 + `copy`/`derive`/`map`/`free` 传播 + 拓扑排序 + 1:1 分配策略 + WebUI 关系图
+- [ ] **M3** `aggregate` 两阶段生成 + `invariants` 校验 + 覆盖策略（pairwise / sample）+ 覆盖度视图
+- [ ] **M4** `split` 拆分模式 + 流式生成 + 生成后自检
+- [ ] **M5** 打磨与集成：打包分发、Python API 稳定化、与测试平台集成
 
-# 技术选型（待定）
+# 技术选型
 
 - 主语言：Python 3.13
 - CLI：Typer
+- WebUI 后端：FastAPI + uvicorn（SSE 推送生成进度）
+- WebUI 前端：React 19 + Vite + TypeScript + Tailwind v4
+- 元数据：SQLAlchemy Inspector（可选依赖，惰性导入）
+- 表达式引擎：基于 Python `ast` 的自研沙箱，语法兼容 Python + MySQL 双风格
 - 数据库适配：PostgreSQL / MySQL / Oracle 兼容层（方言隔离）
-- 可选前端：React + Vite（M5）
+- 测试：pytest + allure
+
+> 选型理由与备选对比见 [docs/tech-design.md](docs/tech-design.md) 第 1 节。
 
 # 状态
 
-项目刚立项，骨架待搭建。当前仓库只有这份 README。
+规格已定稿（PRD + 技术方案），代码骨架待搭建。当前仓库只有文档。
 
 ---
 
