@@ -216,6 +216,7 @@
       <button data-tab="result">结果预览</button>
       <button data-tab="editor">配置编辑器</button>
       <button data-tab="import">快速生成</button>
+      <button data-tab="logs">操作日志</button>
       <button data-tab="sql">SQL 查询台</button>
     </nav>
 
@@ -231,9 +232,10 @@
       <div class="row">
         <span class="hint">像表格一样改配置：字段、分组、类型、取值。改完保存会自动校验。</span>
         <span class="spacer"></span>
+        <button id="btn-editor-load">⟳ 加载左侧配置</button>
         <button class="primary" id="btn-editor-save">保存并校验</button>
       </div>
-      <div id="editor-body"><div class="empty">载入中…</div></div>
+      <div id="editor-body"><div class="empty">点击「⟳ 加载左侧配置」读取当前 YAML。</div></div>
       <div id="editor-out"></div>
     </div>
 
@@ -254,6 +256,15 @@
 
     <div class="tab-body" id="tab-result" hidden>
       <div class="empty">点击「生成数据」查看结果。默认只生成不落盘。</div>
+    </div>
+
+    <div class="tab-body" id="tab-logs" hidden>
+      <div class="row">
+        <span class="hint">记录生成、插入、查询等关键操作 —— 插入相关会标注结果。</span>
+        <span class="spacer"></span>
+        <button id="btn-logs-refresh">刷新</button>
+      </div>
+      <div id="logs-body"><div class="empty">暂无操作记录。</div></div>
     </div>
 
     <div class="tab-body" id="tab-sql" hidden>
@@ -568,6 +579,24 @@ async function loadEditor() {
   }
 }
 
+async function loadEditorFromLeft() {
+  const out = $("editor-out");
+  out.innerHTML = '<div class="empty">读取左侧 YAML…</div>';
+  try {
+    // 先把左栏文本存为当前配置，再取结构化视图 —— 以左侧为准
+    await api("/api/config", {
+      method: "PUT",
+      body: JSON.stringify({ text: $("yaml").value }),
+    });
+    editState.view = await api("/api/config/structured");
+    editState.tableIndex = 0;
+    renderEditor();
+    out.innerHTML = msg("ok", "已加载左侧配置（校验通过）");
+  } catch (e) {
+    out.innerHTML = msg("err", "加载失败：" + e.message);
+  }
+}
+
 function renderEditor() {
   const body = $("editor-body");
   const v = editState.view;
@@ -744,6 +773,12 @@ function renderResult(data) {
     html += msg("err", `生成后自检: ${invFails.length} 行不变量违例`,
       invFails.slice(0, 5).map((f) => `${f.expr} @ ${f.table}#${f.seq}`));
   }
+  // 两段式：生成在内存里预览，确认后才真正入库
+  html += `<div class="row" style="margin-bottom:14px">
+    <button class="primary" id="btn-confirm-insert" ${invFails.length ? 'title="存在不变量违例，仍可插入"' : ""}>确认插入数据库</button>
+    <span class="hint" id="insert-hint">数据在内存中预览，确认后才写入数据库（连接用左栏顶部配置）</span>
+  </div>
+  <div id="insert-out"></div>`;
   for (const name of names) {
     const t = data.tables[name];
     html += `<div class="pane-head" style="padding:10px 0;border:0">
@@ -755,6 +790,35 @@ function renderResult(data) {
     html += '<div style="height:18px"></div>';
   }
   out.innerHTML = html;
+  $("btn-confirm-insert").addEventListener("click", confirmInsert);
+}
+
+async function confirmInsert() {
+  const out = $("insert-out");
+  const btn = $("btn-confirm-insert");
+  btn.disabled = true;
+  $("insert-hint").textContent = "正在插入…";
+  out.innerHTML = "";
+  try {
+    const res = await api("/api/insert", { method: "POST", body: "{}" });
+    if (!res.ok) {
+      out.innerHTML = msg("err", res.message);
+      $("insert-hint").textContent = res.duplicate ? "如需再插一份请重新生成" : "插入被拒绝";
+      btn.disabled = false;
+      setStatus("插入未执行");
+      return;
+    }
+    const detail = Object.entries(res.tables).map(([n, c]) => `${n} ${c} 行`).join(" · ");
+    out.innerHTML = msg("ok", `${res.message}（${res.elapsed_ms} ms → ${escapeHtml(res.masked)}）`);
+    $("insert-hint").textContent = `已入库：${detail}`;
+    setStatus(`插入成功：${detail}`);
+    switchTab("logs");
+  } catch (e) {
+    out.innerHTML = msg("err", e.message);
+    $("insert-hint").textContent = "插入失败，详见操作日志";
+    btn.disabled = false;
+    setStatus("插入失败");
+  }
 }
 
 // ---------------------------------------------------------------- 不变量
@@ -982,9 +1046,31 @@ function guessTableName(sql) {
 
 function switchTab(name) {
   document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
-  ["plan", "graph", "result", "editor", "import", "sql"].forEach((t) => { $("tab-" + t).hidden = t !== name; });
+  ["plan", "graph", "result", "editor", "import", "logs", "sql"].forEach((t) => { $("tab-" + t).hidden = t !== name; });
   if (name === "graph") runGraph();  // 每次切入都重取，配置可能刚改过
   if (name === "editor") loadEditor();
+  if (name === "logs") loadLogs();
+}
+
+// ---------------------------------------------------------------- 操作日志
+
+async function loadLogs() {
+  const body = $("logs-body");
+  try {
+    const res = await api("/api/logs?limit=300");
+    if (!res.logs.length) { body.innerHTML = '<div class="empty">暂无操作记录。</div>'; return; }
+    const rows = res.logs.map((l) => ({
+      "时间": l.time,
+      "操作": l.kind,
+      "详情": l.detail,
+      "结果": l.ok ? "成功" : "失败",
+    }));
+    body.innerHTML =
+      `<div class="stats"><div class="stat"><div class="k">累计操作</div><div class="v">${res.total}</div></div></div>`
+      + tableHtml(["时间", "操作", "详情", "结果"], rows.map((r) => [r["时间"], r["操作"], r["详情"], r["结果"]]));
+  } catch (e) {
+    body.innerHTML = msg("err", e.message);
+  }
 }
 
 document.querySelectorAll(".tabs button").forEach((b) => {
@@ -999,6 +1085,8 @@ $("btn-verify").addEventListener("click", runVerify);
 $("btn-import").addEventListener("click", runImport);
 $("btn-sql-ddl").addEventListener("click", fetchDDL);
 $("btn-editor-save").addEventListener("click", saveEditor);
+$("btn-editor-load").addEventListener("click", loadEditorFromLeft);
+$("btn-logs-refresh").addEventListener("click", loadLogs);
 $("btn-db-load").addEventListener("click", loadDatabase);
 $("btn-db-save").addEventListener("click", saveDatabase);
 $("btn-db-test").addEventListener("click", testDatabase);

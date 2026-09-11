@@ -120,6 +120,52 @@ class AppState:
         if config_path and Path(config_path).exists():
             self.text = Path(config_path).read_text(encoding="utf-8")
         self.last_result: Any = None
+        #: 操作日志（内存最近 500 条 + JSONL 落盘）—— 插入等关键动作可追溯
+        self.operation_logs: list[dict[str, Any]] = []
+        #: 最近一次「确认插入」的指纹，防止同一批数据被重复插入
+        self.inserted_fingerprint: tuple | None = None
+        self.logs_file = Path("logs") / "operations.log"
+
+    def log_operation(self, kind: str, detail: str, ok: bool = True) -> None:
+        """记录一条操作日志：内存保留最近 500 条，同时追加到 logs/operations.log。"""
+        import time as _time  # noqa: PLC0415
+
+        entry = {
+            "time": _time.strftime("%Y-%m-%d %H:%M:%S"),
+            "kind": kind,
+            "detail": detail,
+            "ok": ok,
+        }
+        self.operation_logs.append(entry)
+        self.operation_logs = self.operation_logs[-500:]
+        try:
+            self.logs_file.parent.mkdir(parents=True, exist_ok=True)
+            with self.logs_file.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError:
+            pass  # 日志落盘失败不阻塞主流程
+
+    def persist(self, text: str) -> None:
+        """把配置文本写回绑定的文件。
+
+        写前先备份到 ``.tmp/config-backup/``（保留最近 10 份）——
+        保存类操作是覆盖写，一旦写坏没有备份就无法恢复。
+        """
+        import shutil
+        import time as _time  # noqa: PLC0415
+
+        if not self.config_path:
+            return
+        source = Path(self.config_path)
+        if source.exists():
+            backup_dir = Path(".tmp/config-backup")
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            stamp = _time.strftime("%Y%m%d-%H%M%S")
+            shutil.copy2(source, backup_dir / f"{source.stem}-{stamp}{source.suffix}")
+            backups = sorted(backup_dir.glob(f"{source.stem}-*{source.suffix}"))
+            for stale in backups[:-10]:
+                stale.unlink(missing_ok=True)
+        source.write_text(text, encoding="utf-8")
 
     def parse(self, text: str) -> SeedConfig:
         return service.load_text(text, source=self.config_path or "<webui>")
@@ -179,8 +225,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     @app.put("/api/config")
     def put_config(payload: ConfigPayload) -> dict[str, Any]:
         state.text = payload.text
-        if state.config_path:
-            Path(state.config_path).write_text(state.text, encoding="utf-8")
+        state.persist(state.text)
         return {"saved": True, "path": state.config_path}
 
     @app.post("/api/config/validate")
@@ -300,8 +345,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
         problems = service.check(config)
         state.text = text
-        if state.config_path:
-            Path(state.config_path).write_text(text, encoding="utf-8")
+        state.persist(text)
         return {
             "text": text,
             "saved": bool(state.config_path),
@@ -362,8 +406,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=f"写回后配置不合法: {exc}") from exc
 
         state.text = text
-        if state.config_path:
-            Path(state.config_path).write_text(text, encoding="utf-8")
+        state.persist(text)
         return {
             "text": text,
             "saved": bool(state.config_path),
@@ -502,17 +545,87 @@ def create_app(config_path: str | None = None) -> FastAPI:
                     yield _sse("warning", {"message": item["data"]["message"]})
             events.clear()
 
-            from ..sink import resolve_sink  # noqa: PLC0415
+            from ..sink import MemorySink  # noqa: PLC0415
 
-            sink = resolve_sink(
-                config, out_dir=payload.out_dir, dsn=payload.dsn, dialect=payload.dialect
-            )
+            # WebUI 生成一律走内存 —— 入库是独立的「确认插入」动作，
+            # 预览确认之后再写库（两段式），避免手一滑直接污染数据库
+            sink = MemorySink()
             sink.write(result)
             state.last_result = result
 
-            yield _sse("done", {**state.snapshot(), "sink": sink.describe()})
+            yield _sse("done", {**state.snapshot(), "sink": "内存模式（预览后可确认插入）"})
+            state.log_operation(
+                "生成",
+                f"seed={config.seed}，"
+                + ", ".join(f"{n} {len(t)} 行" for n, t in result.tables.items()),
+            )
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+    @app.get("/api/logs")
+    def get_logs(limit: int = 200) -> dict[str, Any]:
+        """操作日志（最近的在前）。"""
+        logs = list(reversed(state.operation_logs))[: max(1, min(limit, 500))]
+        return {"logs": logs, "total": len(state.operation_logs)}
+
+    @app.post("/api/insert")
+    def insert_result() -> dict[str, Any]:
+        """把最近一次生成的结果插入数据库（生成与入库两段式的第二段）。"""
+        import time as _time  # noqa: PLC0415
+
+        if state.last_result is None:
+            raise HTTPException(status_code=400, detail="还没有生成过数据 —— 请先点「生成数据」")
+
+        result = state.last_result
+        fingerprint = (result.seed, tuple(sorted((n, len(d)) for n, d in result.tables.items())))
+        if state.inserted_fingerprint == fingerprint:
+            state.log_operation("插入", "重复插入被拦截（同一批数据已插入过）", ok=False)
+            return {
+                "ok": False,
+                "duplicate": True,
+                "message": "这批数据已经插入过了。如需再插一份，请重新生成（同 seed 会生成同样数据，建议改 seed）",
+            }
+
+        config = _current_config(state)
+        spec = config.database if config and config.database else None
+        if spec is None or spec.resolved_url() is None:
+            detail = "未配置数据库连接 —— 请在左栏顶部填写并保存连接信息"
+            state.log_operation("插入", detail, ok=False)
+            raise HTTPException(status_code=400, detail=detail)
+
+        problem = spec.env_problem()
+        if problem:
+            state.log_operation("插入", problem, ok=False)
+            raise HTTPException(status_code=400, detail=problem)
+
+        url = spec.resolved_url()
+        from ..sink import DbSink  # noqa: PLC0415
+
+        started = _time.perf_counter()
+        try:
+            sink = DbSink(
+                url=url,
+                dialect=spec.dialect or (spec.type or "mysql"),
+                batch_size=spec.batch_size,
+            )
+            sink.write(result)
+        except TableSeedError as exc:
+            state.log_operation("插入", f"入库失败: {exc}", ok=False)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        elapsed = int((_time.perf_counter() - started) * 1000)
+        state.inserted_fingerprint = fingerprint
+        summary = ", ".join(f"{n} {len(d)} 行" for n, d in result.tables.items())
+        state.log_operation(
+            "插入", f"入库成功（{summary}，{elapsed} ms → {spec.describe()})"
+        )
+        return {
+            "ok": True,
+            "elapsed_ms": elapsed,
+            "tables": {n: len(d) for n, d in result.tables.items()},
+            "masked": spec.describe(),
+            "message": f"插入成功：{summary}",
+        }
 
     @app.get("/api/result")
     def result() -> dict[str, Any]:
@@ -529,6 +642,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
                 status_code=400,
                 detail="未配置数据库连接 —— 在页面上填写连接信息，或保存到配置的 database 段",
             )
+        state.log_operation("建表语句", f"反射表 {payload.table} 的建表语句")
         return {"ddl": _reflect_ddl(url, payload.table)}
 
     @app.post("/api/sql/execute")
@@ -566,9 +680,15 @@ def create_app(config_path: str | None = None) -> FastAPI:
         timeout = config.sql.timeout_seconds if config else 30
 
         try:
-            return _run_sql(url, statement, max_rows=max_rows, timeout=timeout)
+            result = _run_sql(url, statement, max_rows=max_rows, timeout=timeout)
         except TableSeedError as exc:
+            state.log_operation("SQL 查询", f"{_first_line(statement)} → 失败: {exc}", ok=False)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        state.log_operation(
+            "SQL 查询", f"{_first_line(statement)} → {result['row_count']} 行"
+        )
+        return result
 
     return app
 
@@ -712,6 +832,12 @@ def _current_config(state: AppState) -> SeedConfig | None:
         return state.parse(state.text)
     except TableSeedError:
         return None
+
+
+def _first_line(text: str) -> str:
+    """SQL 语句摘要：取第一行、截断到 60 字符，用于日志展示。"""
+    line = text.strip().splitlines()[0] if text.strip() else ""
+    return line[:60] + ("…" if len(line) > 60 else "")
 
 
 def _safe_table_names(conn) -> list[str] | None:
