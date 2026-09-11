@@ -185,7 +185,6 @@
           <span class="hint">连接</span>
           <select id="db-conn-select" style="flex:1"><option value="">— 选择已有连接 —</option></select>
           <button id="btn-db-apply" title="切换到该连接">切换</button>
-          <button id="btn-db-del" title="删除该连接">删除</button>
         </div>
         <div class="db-grid">
           <input type="text" id="db-conn-name" placeholder="连接名（保存时用）">
@@ -207,6 +206,7 @@
         <div class="db-foot">
           <span class="hint" id="db-masked"></span>
           <span class="spacer"></span>
+          <button id="btn-db-delete">删除</button>
           <button id="btn-db-save">保存连接</button>
         </div>
       </div>
@@ -228,9 +228,9 @@
       <button data-tab="graph">关系图</button>
       <button data-tab="result">结果预览</button>
       <button data-tab="editor">配置编辑器</button>
-      <button data-tab="import">快速生成</button>
-      <button data-tab="logs">操作日志</button>
+      <button data-tab="import">生成配置</button>
       <button data-tab="sql">SQL 查询台</button>
+      <button data-tab="logs">操作日志</button>
     </nav>
 
     <div class="tab-body" id="tab-plan">
@@ -245,6 +245,7 @@
       <div class="row">
         <span class="hint">像表格一样改配置：字段、分组、类型、取值。改完保存会自动校验。</span>
         <span class="spacer"></span>
+        <button id="btn-editor-help">? 帮助</button>
         <button id="btn-editor-load">⟳ 加载左侧配置</button>
         <button class="primary" id="btn-editor-save">保存并校验</button>
       </div>
@@ -273,11 +274,35 @@
 
     <div class="tab-body" id="tab-logs" hidden>
       <div class="row">
-        <span class="hint">记录生成、插入、查询等关键操作 —— 插入相关会标注结果。</span>
-        <span class="spacer"></span>
+        <select id="logs-kind" style="width:120px">
+          <option value="">全部类型</option>
+          <option>生成</option>
+          <option>插入</option>
+          <option>SQL 查询</option>
+          <option>建表语句</option>
+          <option>保存连接</option>
+          <option>切换连接</option>
+          <option>删除连接</option>
+          <option>清理日志</option>
+        </select>
+        <select id="logs-ok" style="width:90px">
+          <option value="">全部结果</option>
+          <option value="true">成功</option>
+          <option value="false">失败</option>
+        </select>
+        <input type="text" id="logs-q" class="grow" placeholder="关键字搜索（详情内容）">
+        <button id="btn-logs-query">查询</button>
         <button id="btn-logs-refresh">刷新</button>
+        <button id="btn-logs-clear">清空日志</button>
       </div>
       <div id="logs-body"><div class="empty">暂无操作记录。</div></div>
+      <div class="row" id="logs-pager" style="margin-top:10px" hidden>
+        <button id="logs-prev">上一页</button>
+        <span class="hint" id="logs-page-info"></span>
+        <button id="logs-next">下一页</button>
+        <span class="spacer"></span>
+        <span class="hint">每页 50 条</span>
+      </div>
     </div>
 
     <div class="tab-body" id="tab-sql" hidden>
@@ -616,6 +641,30 @@ async function loadEditorFromLeft() {
   } catch (e) {
     out.innerHTML = msg("err", "加载失败：" + e.message);
   }
+}
+
+function showEditorHelp() {
+  const rows = [
+    ["enum", "values", "枚举取值，JSON 数组。每组是一个元组（组内字段共进退）：[[\"01\",\"正常\"],[\"02\",\"冻结\"]]。有限组之间做笛卡尔积"],
+    ["boundary", "values", "边界值枚举，写法同 enum，语义上表示测试边界（空串/0/最大值等）"],
+    ["dict", "from", "取值来自父表某列的 distinct 值（from: 父列名）"],
+    ["sequence", "start / format", "自增编号。start 起始数字；format 模板如 \"TXN{seq:06d}\"（{seq} 为占位符）。不填 format 则输出纯数字"],
+    ["random", "generator + range", "generator 选生成器：int（整数）、decimal（小数，scale 定小数位）、choice（从 values 里随机）、date（日期区间）、string（随机串，range=[最小,最大] 长度）。range 是取值范围如 [0,1000]"],
+    ["const", "value", "固定值，JSON 数组且与字段数一致：[\"0001\"]（两字段则 [\"0001\",\"001\"]）"],
+    ["derive", "expr", "表达式计算，可引用本行字段与 parent.*（父行字段）：\"balance * 0.01\""],
+    ["ref", "from", "引用父表字段（from: 父列名），值照抄"],
+    ["aggregate", "from + expr", "反向汇总（子表 → 父表），expr 用聚合函数：\"sum(net_amount)\" / \"count()\""],
+  ];
+  const head = ["类型", "参数", "说明"];
+  const body = rows.map((r) => `<tr><td><b>${r[0]}</b></td><td style="font-family:var(--mono);font-size:11.5px">${escapeHtml(r[1])}</td><td style="white-space:normal">${escapeHtml(r[2])}</td></tr>`).join("");
+  $("help-dialog-content").innerHTML = `
+    <p style="margin-top:0">每个字段必须且只能属于一个组（不重不漏）；同组字段共进退。
+    有限取值组（enum / boundary / dict）之间做笛卡尔积决定行数；
+    其余组逐行现算。</p>
+    <table style="width:100%">${body}</table>
+    <p style="margin-bottom:0">JSON 写法提示：values / value / range 都要写成合法 JSON ——
+    字符串带双引号、数字不带。改完点「保存并校验」，不合法会被当场拦下。</p>`;
+  $("help-dialog").showModal();
 }
 
 function renderEditor() {
@@ -1056,9 +1105,12 @@ async function fetchDDL() {
 
 let lastQuery = null;  // 最近一次查询 {columns, rows}
 
+let sqlPage = 1;
+const SQL_PAGE_SIZE = 50;
+
 async function runSql() {
   const out = $("sql-out");
-  if (!dbReady()) { out.innerHTML = msg("warn", "请先填写数据库连接（地址 / 用户名 / 数据库名）"); return; }
+  if (!dbReady()) { out.innerHTML = msg("warn", "请先在左栏顶部填写数据库连接"); return; }
   out.innerHTML = '<div class="empty">执行中…</div>';
   try {
     const res = await api("/api/sql/execute", {
@@ -1066,25 +1118,47 @@ async function runSql() {
       body: JSON.stringify({ sql: $("sql-text").value, database: dbForm() }),
     });
     lastQuery = { columns: res.columns, rows: res.rows };
-    const insertBtn = `<button id="btn-sql-insert">由查询结果生成 INSERT（前 10 行）</button>`;
-    const info = `<div class="msg ok">返回 ${res.row_count} 行，耗时 ${res.elapsed_ms} ms${res.truncated ? "（已截断）" : ""} ${insertBtn}</div>`;
-    out.innerHTML = info + tableHtml(res.columns, res.rows);
-    $("btn-sql-insert").addEventListener("click", () => {
-      if (!lastQuery || !lastQuery.rows.length) return;
-      const table = $("sql-table").value.trim() || guessTableName($("sql-text").value);
-      const text = rowsToInserts(table, lastQuery.columns, lastQuery.rows, 10);
-      out.innerHTML = `<div class="msg ok">已生成 ${Math.min(10, lastQuery.rows.length)} 条 INSERT（表名 ${escapeHtml(table)}，可自行修改）</div>
-        <textarea class="sqlbox" readonly style="height:220px">${escapeHtml(text)}</textarea>
-        <div class="row" style="margin-top:8px"><button id="btn-ins-to-imp">送到「快速生成」</button></div>`;
-      $("btn-ins-to-imp").addEventListener("click", () => {
-        $("imp-inserts").value = text;
-        $("imp-table").value = table;
-        switchTab("import");
-      });
-    });
+    sqlPage = 1;
+    renderSqlResult(res, out);
   } catch (e) {
     out.innerHTML = msg("err", e.message);
   }
+}
+
+function renderSqlResult(res, out) {
+  const insertBtn = `<button id="btn-sql-insert">由查询结果生成 INSERT（前 10 行）</button>`;
+  const info = `<div class="msg ok">返回 ${res.row_count} 行，耗时 ${res.elapsed_ms} ms${res.truncated ? "（已截断）" : ""} ${insertBtn}</div>`;
+  const pages = Math.max(1, Math.ceil(lastQuery.rows.length / SQL_PAGE_SIZE));
+  sqlPage = Math.min(sqlPage, pages);
+  const start = (sqlPage - 1) * SQL_PAGE_SIZE;
+  const slice = lastQuery.rows.slice(start, start + SQL_PAGE_SIZE);
+
+  let pager = "";
+  if (lastQuery.rows.length > SQL_PAGE_SIZE) {
+    pager = `<div class="row" style="margin-top:8px">
+      <button id="sql-prev" ${sqlPage <= 1 ? "disabled" : ""}>上一页</button>
+      <span class="hint">第 ${sqlPage} / ${pages} 页 · 共 ${lastQuery.rows.length} 行</span>
+      <button id="sql-next" ${sqlPage >= pages ? "disabled" : ""}>下一页</button>
+    </div>`;
+  }
+
+  out.innerHTML = info + tableHtml(res.columns, slice) + pager;
+  $("btn-sql-insert").addEventListener("click", () => {
+    if (!lastQuery || !lastQuery.rows.length) return;
+    const table = $("sql-table").value.trim() || guessTableName($("sql-text").value);
+    const text = rowsToInserts(table, lastQuery.columns, lastQuery.rows, 10);
+    out.innerHTML = `<div class="msg ok">已生成 ${Math.min(10, lastQuery.rows.length)} 条 INSERT（表名 ${escapeHtml(table)}，可自行修改）</div>
+      <textarea class="sqlbox" readonly style="height:220px">${escapeHtml(text)}</textarea>
+      <div class="row" style="margin-top:8px"><button id="btn-ins-to-imp">送到「生成配置」</button></div>`;
+    $("btn-ins-to-imp").addEventListener("click", () => {
+      $("imp-inserts").value = text;
+      $("imp-table").value = table;
+      switchTab("import");
+    });
+  });
+  const prev = $("sql-prev"), next = $("sql-next");
+  if (prev) prev.addEventListener("click", () => { sqlPage--; renderSqlResult(res, out); });
+  if (next) next.addEventListener("click", () => { sqlPage++; renderSqlResult(res, out); });
 }
 
 function guessTableName(sql) {
@@ -1104,42 +1178,61 @@ function switchTab(name) {
 
 // ---------------------------------------------------------------- 操作日志
 
+const logsState = { page: 1, pageSize: 50 };
+
 async function loadLogs() {
   const body = $("logs-body");
+  const kind = encodeURIComponent($("logs-kind").value);
+  const ok = encodeURIComponent($("logs-ok").value);
+  const q = encodeURIComponent($("logs-q").value.trim());
   try {
-    const res = await api("/api/logs?limit=300");
-    if (!res.logs.length) { body.innerHTML = '<div class="empty">暂无操作记录。</div>'; return; }
+    const res = await api(`/api/logs?page=${logsState.page}&page_size=${logsState.pageSize}&kind=${kind}&ok=${ok}&q=${q}`);
+    logsState.pages = res.pages;
+    if (!res.logs.length) {
+      body.innerHTML = '<div class="empty">没有符合条件的操作记录。</div>';
+      $("logs-pager").hidden = true;
+      return;
+    }
     const TRUNC = 90;
-    const rows = res.logs.map((l, i) => {
+    const rows = res.logs.map((l) => {
       const short = l.detail.length > TRUNC ? l.detail.slice(0, TRUNC) + "…" : l.detail;
       const viewBtn = l.detail.length > TRUNC
-        ? ` <button class="log-detail-btn" data-i="${i}">详情</button>` : "";
-      return [l.time, l.kind,
-        `<span title="${escapeHtml(l.detail)}">${escapeHtml(short)}</span>${viewBtn}`,
-        l.ok ? "成功" : "失败"];
-    });
-    body.innerHTML =
-      `<div class="stats"><div class="stat"><div class="k">累计操作</div><div class="v">${res.total}</div></div></div>`
-      + tableHtml(["时间", "操作", "详情", "结果"], rows)
-      + `<dialog id="log-dialog" style="max-width:720px">
-           <div style="margin-bottom:10px;font-weight:600">操作详情</div>
-           <pre id="log-dialog-content" style="white-space:pre-wrap;word-break:break-all;font-size:12.5px;line-height:1.6"></pre>
-           <div style="text-align:right;margin-top:12px">
-             <button onclick="this.closest('dialog').close()">关闭</button>
-           </div>
-         </dialog>`;
-    // 超长详情的「详情」按钮 → 弹窗展示全文
-    document.querySelectorAll(".log-detail-btn").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        const log = res.logs[+btn.dataset.i];
-        $("log-dialog-content").textContent =
-          `[${log.time}] ${log.kind}\n${log.detail}\n结果: ${log.ok ? "成功" : "失败"}`;
-        $("log-dialog").showModal();
-      });
-    });
+        ? ` <button class="log-detail-btn" data-full="${escapeHtml(l.detail)}" data-meta="${escapeHtml(`[${l.time}] ${l.kind}`)}" data-ok="${l.ok ? "成功" : "失败"}">详情</button>` : "";
+      return `<tr>
+        <td>${escapeHtml(l.time)}</td>
+        <td>${escapeHtml(l.kind)}</td>
+        <td style="max-width:480px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+          ${escapeHtml(short)}${viewBtn}
+        </td>
+        <td>${escapeHtml(l.ok ? "成功" : "失败")}</td>
+      </tr>`;
+    }).join("");
+    body.innerHTML = `<table><thead><tr>
+        <th>时间</th><th>操作</th><th style="min-width:320px">详情</th><th>结果</th>
+      </tr></thead><tbody>${rows}</tbody></table>`;
+    renderPager(res);
+    bindLogDetail();
   } catch (e) {
     body.innerHTML = msg("err", e.message);
   }
+}
+
+function bindLogDetail() {
+  document.querySelectorAll(".log-detail-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      $("log-dialog-content").textContent =
+        `${btn.dataset.meta}\n${btn.dataset.full}\n结果: ${btn.dataset.ok}`;
+      $("log-dialog").showModal();
+    });
+  });
+}
+
+function renderPager(res) {
+  const pager = $("logs-pager");
+  pager.hidden = res.pages <= 1;
+  $("logs-page-info").textContent = `第 ${res.page} / ${res.pages} 页 · 共 ${res.total} 条`;
+  $("logs-prev").disabled = res.page <= 1;
+  $("logs-next").disabled = res.page >= res.pages;
 }
 
 document.querySelectorAll(".tabs button").forEach((b) => {
@@ -1155,16 +1248,16 @@ $("btn-import").addEventListener("click", runImport);
 $("btn-sql-ddl").addEventListener("click", fetchDDL);
 $("btn-editor-save").addEventListener("click", saveEditor);
 $("btn-editor-load").addEventListener("click", loadEditorFromLeft);
+$("btn-editor-help").addEventListener("click", showEditorHelp);
 $("btn-logs-refresh").addEventListener("click", loadLogs);
-$("btn-db-load")?.remove();
 $("btn-db-save").addEventListener("click", saveConnection);
+$("btn-db-delete").addEventListener("click", deleteConnection);
 $("btn-db-test").addEventListener("click", testDatabase);
 $("btn-db-apply").addEventListener("click", () => {
   const name = $("db-conn-select").value;
   if (!name) { dbMessage("err", "请先在下拉中选择连接"); return; }
   switchConnection(name);
 });
-$("btn-db-del").addEventListener("click", deleteConnection);
 $("db-conn-select").addEventListener("change", (e) => {
   if (e.target.value) switchConnection(e.target.value);   // 选中即切换（含回填）
 });
@@ -1182,7 +1275,32 @@ $("db-type").addEventListener("change", (e) => {
   if (!$("db-port").value) $("db-port").value = DB_DEFAULT_PORT[e.target.value] || "";
 });
 
+$("btn-logs-refresh").addEventListener("click", () => { logsState.page = 1; loadLogs(); });
+$("btn-logs-query").addEventListener("click", () => { logsState.page = 1; loadLogs(); });
+$("logs-kind").addEventListener("change", () => { logsState.page = 1; loadLogs(); });
+$("logs-ok").addEventListener("change", () => { logsState.page = 1; loadLogs(); });
+$("logs-q").addEventListener("keydown", (e) => { if (e.key === "Enter") { logsState.page = 1; loadLogs(); } });
+$("logs-prev").addEventListener("click", () => { if (logsState.page > 1) { logsState.page--; loadLogs(); } });
+$("logs-next").addEventListener("click", () => { if (logsState.page < logsState.pages) { logsState.page++; loadLogs(); } });
+$("btn-logs-clear").addEventListener("click", async () => {
+  if (!confirm("确定清空全部操作日志？此操作不可恢复。")) return;
+  try {
+    await api("/api/logs/clear", { method: "POST", body: "{}" });
+    logsState.page = 1;
+    loadLogs();
+    setStatus("操作日志已清空");
+  } catch (e) { $("logs-body").innerHTML = msg("err", e.message); }
+});
+
 boot();
 </script>
+<dialog id="help-dialog" style="max-width:820px;max-height:80vh;overflow:auto">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+    <b style="font-size:15px">配置编辑器帮助 —— 组类型与取值/参数设置</b>
+    <span class="spacer"></span>
+    <button onclick="this.closest('dialog').close()">关闭</button>
+  </div>
+  <div id="help-dialog-content"></div>
+</dialog>
 </body>
 </html>

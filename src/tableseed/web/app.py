@@ -571,10 +571,45 @@ def create_app(config_path: str | None = None) -> FastAPI:
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     @app.get("/api/logs")
-    def get_logs(limit: int = 200) -> dict[str, Any]:
-        """操作日志（最近的在前）。"""
-        logs = list(reversed(state.operation_logs))[: max(1, min(limit, 500))]
-        return {"logs": logs, "total": len(state.operation_logs)}
+    def get_logs(
+        page: int = 1,
+        page_size: int = 50,
+        kind: str | None = None,
+        q: str | None = None,
+        ok: str | None = None,
+    ) -> dict[str, Any]:
+        """操作日志：分页 + 按操作类型 / 关键字 / 结果筛选（最近的在前）。"""
+        logs = list(reversed(state.operation_logs))
+        if kind:
+            logs = [l for l in logs if l["kind"] == kind]
+        if q:
+            logs = [l for l in logs if q.lower() in l["detail"].lower()]
+        if ok is not None and ok != "":
+            want = ok.lower() == "true"
+            logs = [l for l in logs if l["ok"] == want]
+
+        total = len(logs)
+        page = max(1, page)
+        page_size = max(1, min(page_size, 200))
+        start = (page - 1) * page_size
+        return {
+            "logs": logs[start : start + page_size],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "pages": max(1, -(-total // page_size)),
+        }
+
+    @app.post("/api/logs/clear")
+    def clear_logs() -> dict[str, Any]:
+        """清空操作日志（内存与落盘文件）。"""
+        state.operation_logs.clear()
+        try:
+            state.logs_file.write_text("", encoding="utf-8")
+        except OSError:
+            pass
+        state.log_operation("清理日志", "操作日志已清空")
+        return {"ok": True}
 
     @app.post("/api/insert")
     def insert_result(payload: dict[str, Any]) -> dict[str, Any]:

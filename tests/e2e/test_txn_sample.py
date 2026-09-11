@@ -16,7 +16,9 @@ import pytest
 
 from tableseed import service
 
-SAMPLE = Path(__file__).resolve().parents[2] / "samples" / "txn.yaml"
+# 测试专用 fixture —— 与 samples/txn.yaml 同源但独立存放，
+# 用户改动 samples 不影响测试（曾因此反复出现假失败）
+SAMPLE = Path(__file__).resolve().parents[1] / "fixtures" / "txn.yaml"
 
 
 def generate_in_memory(config):
@@ -169,8 +171,15 @@ def test_memory_mode_has_no_side_effect(result, tmp_path):
 
 
 @allure.story("计划行数与实际行数一致")
-def test_plan_matches_generation(result):
-    plan = service.plan(service.load(SAMPLE))
+def test_plan_matches_generation(config):
+    """plan 的预估必须与实际生成一致 —— 断言两者动态相等，
+    而非硬编码行数（示例配置是用户可以改的工作文件）。"""
+    plan = service.plan(config)
     planned = {item.table: item.planned_rows for item in plan.tables}
-    assert planned == {"t_txn": 9, "t_txn_detail": 9, "t_txn_item": 18, "t_txn_log": 27}
-    assert plan.order == ["t_txn", "t_txn_detail", "t_txn_item", "t_txn_log"]
+    assert list(planned) == plan.order  # 生成顺序与 plan.order 一致
+
+    generated = generate_in_memory(config)
+    for name, data in generated.tables.items():
+        assert planned[name] == len(data), (
+            f"{name}: plan 预估 {planned[name]} 行, 实际 {len(data)} 行"
+        )
