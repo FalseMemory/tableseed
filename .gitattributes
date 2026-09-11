@@ -1,0 +1,11 @@
+# 行尾策略：Windows 批处理必须保持 CRLF —— cmd 对 LF-only 的 bat 解析会错乱
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 常规文本
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.txt text eol=lf
