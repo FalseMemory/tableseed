@@ -125,6 +125,21 @@ class AppState:
         #: 最近一次「确认插入」的指纹，防止同一批数据被重复插入
         self.inserted_fingerprint: tuple | None = None
         self.logs_file = Path("logs") / "operations.log"
+        self._restore_logs()
+
+    def _restore_logs(self) -> None:
+        """重启后从 JSONL 恢复历史日志（解析失败的行跳过）。"""
+        if not self.logs_file.exists():
+            return
+        try:
+            for line in self.logs_file.read_text(encoding="utf-8").splitlines():
+                try:
+                    self.operation_logs.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            self.operation_logs = self.operation_logs[-500:]
+        except OSError:
+            pass
 
     def log_operation(self, kind: str, detail: str, ok: bool = True) -> None:
         """记录一条操作日志：内存保留最近 500 条，同时追加到 logs/operations.log。"""
