@@ -239,5 +239,5 @@ database:
   port: 3306
   user: root
   password_env: TABLESEED_DB_PASSWORD
-  database: testdb
+  database: tableseed_demo
   charset: utf8mb4
