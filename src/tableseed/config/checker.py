@@ -315,10 +315,44 @@ def _check_expressions(config: SeedConfig, funcs: dict) -> list[str]:
                     problems.append(str(exc))
 
     for index, source in enumerate(config.invariants):
-        try:
-            Expression(source, funcs, f"invariants[{index}]")
-        except ExprError as exc:
-            problems.append(str(exc))
+        problems.extend(_check_invariant(config, index, source, funcs))
+
+    return problems
+
+
+def _check_invariant(config: SeedConfig, index: int, invariant, funcs: dict) -> list[str]:
+    """静态校验一条不变量：表存在、from 是子表且有 join、表达式可编译。"""
+    problems: list[str] = []
+    path = f"invariants[{index}]"
+    names = {t.name for t in config.tables}
+
+    if invariant.table and invariant.table not in names:
+        problems.append(f"{path}: 表不存在: {invariant.table}")
+
+    if invariant.table and invariant.from_:
+        source = invariant.from_.split(".")[0]
+        if source not in names:
+            problems.append(f"{path}: 源表不存在: {source}")
+        else:
+            matched = [
+                r
+                for r in config.relations
+                if r.parent == invariant.table and r.child == source
+            ]
+            if not matched:
+                problems.append(
+                    f"{path}: 源表 {source} 不是 {invariant.table} 的子表"
+                )
+            elif not matched[0].join:
+                problems.append(
+                    f"{path}: 跨表不变量需要锚点，"
+                    f"但关系 {invariant.table} → {source} 未声明 join"
+                )
+
+    try:
+        Expression(invariant.expr, funcs, path)
+    except ExprError as exc:
+        problems.append(str(exc))
 
     return problems
 

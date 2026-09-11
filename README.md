@@ -307,17 +307,32 @@ relations:
 
 ## 2.7 不变量：把「对得上」变成可校验的断言
 
-传播规则只保证生成时对，还要能证明对：
+传播规则只保证生成时对，还要能证明对。不变量分两种形态：
+
+**行级断言** —— 在指定表的每一行上求值：
 
 ```yaml
 invariants:
-  - "每个 t_txn.txn_no 在 t_txn_detail 中恰好 1 行"
-  - "t_txn_detail.currency == t_txn.currency by txn_no"
-  - "t_txn.detail_count == count(t_txn_detail) by txn_no"
-  - "Σ t_txn_detail.detail_amt by txn_no == t_txn.amount"
+  - table: t_txn
+    expr: "fee <= amount"
 ```
 
-生成结束后逐条求值，失败即报错并列出违例行 —— **先声明口径，再验证口径**。
+**跨表断言** —— 对 `table` 每行取其 `from` 子行集合，可用聚合函数（复用 aggregate 求值器）：
+
+```yaml
+invariants:
+  - table: t_txn
+    from: t_txn_detail
+    expr: "sum(net_amount) = amount - fee"   # MySQL 风格的 = 也认
+
+  - table: t_txn
+    from: t_txn_log
+    expr: "count() = 3"
+```
+
+`tableseed verify -c config.yaml` 生成一份内存数据逐条求值；
+WebUI 里点「验证不变量」看同样结果。违例行会连同整行数据一起列出来 ——
+**先声明口径，再验证口径**。裸字符串写法（`- "fee <= amount"`）兼容，作用域为全部表。
 
 ---
 
@@ -441,6 +456,7 @@ tables:
 tableseed ui     -c seed.yaml             # 启动 WebUI：配置、预演、生成、预览、查数据都在浏览器里
 tableseed plan   -c seed.yaml             # 预演：打印各表组合数/行数/依赖序，不产出数据
 tableseed check  -c seed.yaml             # 校验配置：分组不重不漏、依赖无环、关系完整、组合规模
+tableseed verify -c seed.yaml             # 校验不变量：生成内存数据逐条断言，列出违例行
 tableseed gen    -c seed.yaml             # 无数据库连接 → 只生成不落盘，返回内存对象
 tableseed gen    -c seed.yaml --dsn ...   # 提供数据库连接 → 直接执行入库
 tableseed gen    -c seed.yaml -o out/     # 显式落盘 SQL / CSV
@@ -469,8 +485,8 @@ t_account     枚举组: g_status(2) × g_currency(2) × g_channel(3) = 12 组�
 
 - [x] **M1** 分组模型 + 单表笛卡尔积展开 + 执行策略（直连/内存）+ CLI + **WebUI 最小闭环**（配置→预演→生成→预览）+ SQL 查询台
 - [x] **M2** 表间关系内核 + WebUI 关系图：四要素 + `copy`/`derive`/`map`/`free` 传播 + 拓扑排序 + 1:1 分配策略 + `ref` 组
-- [x] **M3** `aggregate` 两阶段回填（Phase 2 反向汇总）
-- [ ] M3 收尾：`invariants` 不变量校验 + 覆盖策略（pairwise / sample）+ 覆盖度视图
+- [x] **M3** `aggregate` 两阶段回填 + `invariants` 不变量校验（`tableseed verify` / 页面「验证不变量」）
+- [ ] M3 收尾：覆盖策略（pairwise / sample）+ 覆盖度视图
 - [ ] **M4** `split` 拆分模式 + 流式生成 + 生成后自检 + 多父（N:M）
 - [ ] **M5** 打磨与集成：打包分发、Python API 稳定化、与测试平台集成
 
@@ -489,7 +505,7 @@ t_account     枚举组: g_status(2) × g_currency(2) × g_channel(3) = 12 组�
 
 # 状态
 
-M1（单表内核 + WebUI 闭环）、M2（表间关系内核 + 关系图）、M3（aggregate 两阶段回填）已完成，**148 条测试通过**。
+M1（单表内核 + WebUI 闭环）、M2（表间关系内核 + 关系图）、M3（aggregate 两阶段回填 + 不变量校验）已完成，**162 条测试通过**。
 
 ```bash
 tableseed check -c samples/txn.yaml   # 校验：分组完备性 / 依赖环 / 字段引用

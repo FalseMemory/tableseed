@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ---------------------------------------------------------------- 枚举类型
 
@@ -112,6 +112,37 @@ class TableSpec(_Model):
     rows: int | None = None
 
 
+class InvariantSpec(_Model):
+    """一条不变量断言（README 2.7：先声明口径，再验证口径）。
+
+    两种写法：
+
+    行级断言 —— 对 ``table`` 的每一行求值（``table`` 缺省时对所有表）::
+
+        - table: t_txn
+          expr: "fee <= amount"
+
+    跨表断言 —— 对 ``table`` 每行取其 ``from`` 子行集合，可用聚合函数::
+
+        - table: t_txn
+          from: t_txn_detail
+          expr: "sum(net_amount) = amount - fee"
+
+    兼容旧写法：裸字符串 ``"fee <= amount"`` 等价于行级断言。
+    """
+
+    table: str | None = None
+    from_: str | None = Field(default=None, alias="from")
+    expr: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_plain_string(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return {"expr": value}
+        return value
+
+
 class JoinKey(_Model):
     """父子表的锚点字段对。"""
 
@@ -189,9 +220,19 @@ class SeedConfig(_Model):
     limits: LimitsSpec = Field(default_factory=LimitsSpec)
     tables: list[TableSpec]
     relations: list[RelationSpec] = Field(default_factory=list)
-    invariants: list[str] = Field(default_factory=list)
+    invariants: list[InvariantSpec] = Field(default_factory=list)
     database: DatabaseSpec | None = None
     sql: SqlSpec = Field(default_factory=SqlSpec)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _none_list_to_empty(cls, value: Any) -> Any:
+        """YAML 里写 ``invariants:``（无值）会解析成 None —— 视为空列表。"""
+        if isinstance(value, dict):
+            for key in ("relations", "invariants"):
+                if value.get(key) is None:
+                    value[key] = []
+        return value
 
     def table(self, name: str) -> TableSpec:
         for t in self.tables:

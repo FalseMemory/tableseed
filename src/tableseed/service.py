@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from .config import check_config, load_config, load_config_from_text
-from .engine import generate_all
+from .engine import InvariantFailure, generate_all, verify_invariants
 from .models import GenerateResult, PlanResult, SeedConfig
 from .plan import plan_tables
 from .rng import SeededRandom
@@ -23,6 +23,7 @@ __all__ = [
     "load",
     "load_text",
     "plan",
+    "verify",
 ]
 
 
@@ -44,6 +45,22 @@ def check(config: SeedConfig) -> list[str]:
 def plan(config: SeedConfig) -> PlanResult:
     """规模预演，不产出数据。"""
     return plan_tables(config)
+
+
+def verify(
+    config: SeedConfig,
+    result: GenerateResult | None = None,
+    dsn: str | None = None,
+    out_dir: str | Path | None = None,
+) -> list[InvariantFailure]:
+    """对生成结果逐条求值不变量，返回违例清单（空 = 全部通过）。
+
+    ``result`` 缺省时先在内存里生成一份（不落盘）——
+    验证的是「这套配置会造出什么」，而不是「库里已有什么」。
+    """
+    if result is None:
+        result = generate_all(config, SeededRandom(config.seed))
+    return verify_invariants(config, result.tables)
 
 
 def generate(

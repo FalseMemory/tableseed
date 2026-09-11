@@ -143,6 +143,7 @@
       <button class="primary" id="btn-gen">生成数据</button>
       <button id="btn-plan">预演</button>
       <button id="btn-validate">校验</button>
+      <button id="btn-verify">验证不变量</button>
       <button id="btn-save">保存配置</button>
     </div>
   </section>
@@ -485,6 +486,49 @@ function renderResult(data) {
   out.innerHTML = html;
 }
 
+// ---------------------------------------------------------------- 不变量
+
+async function runVerify() {
+  switchTab("result");
+  const out = $("tab-result");
+  out.innerHTML = '<div class="empty">生成内存数据并逐条求值不变量…</div>';
+  try {
+    const res = await api("/api/verify", {
+      method: "POST",
+      body: JSON.stringify({ text: $("yaml").value }),
+    });
+
+    if (!res.total) {
+      out.innerHTML = msg("warn", "配置里没有声明 invariants，无事可验");
+      setStatus("未声明不变量");
+      return;
+    }
+
+    const head = ["#", "不变量", "表", "行号", "违例行数据"];
+    const rows = res.failures.map((f) => [
+      f.index,
+      f.expr,
+      f.table,
+      "#" + f.seq,
+      Object.entries(f.row).slice(0, 8).map(([k, v]) => `${k}=${v}`).join(" · "),
+    ]);
+
+    let html = `
+      <div class="stats">
+        <div class="stat"><div class="k">不变量</div><div class="v">${res.total}</div></div>
+        <div class="stat"><div class="k">违例</div><div class="v" style="color:${res.passed ? "var(--ok)" : "var(--err)"}">${res.failures.length}</div></div>
+      </div>`;
+    html += res.passed
+      ? msg("ok", "全部不变量通过 —— 造出的数据满足声明的口径")
+      : msg("err", `${res.failures.length} 行违例`, []);
+    if (rows.length) html += tableHtml(head, rows);
+    out.innerHTML = html;
+    setStatus(res.passed ? "不变量全部通过" : `不变量违例 ${res.failures.length} 行`);
+  } catch (e) {
+    out.innerHTML = msg("err", e.message);
+  }
+}
+
 // ---------------------------------------------------------------- SQL 查询台
 
 async function runSql() {
@@ -518,6 +562,7 @@ $("btn-plan").addEventListener("click", runPlan);
 $("btn-gen").addEventListener("click", runGenerate);
 $("btn-save").addEventListener("click", saveConfig);
 $("btn-sql").addEventListener("click", runSql);
+$("btn-verify").addEventListener("click", runVerify);
 
 boot();
 </script>

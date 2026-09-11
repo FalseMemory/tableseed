@@ -154,6 +154,44 @@ def gen(
 
 
 @app.command()
+def verify(
+    config: Path = CONFIG_OPTION,
+    preview: int = typer.Option(5, "--preview", help="每个违例显示的字段预览行数"),
+) -> None:
+    """校验不变量：生成一份内存数据，逐条断言「对得上」。"""
+    seed_config = _load(config)
+
+    if not seed_config.invariants:
+        console.print("[yellow]! 配置里没有声明 invariants，无事可验[/yellow]")
+        return
+
+    try:
+        failures = service.verify(seed_config)
+    except TableSeedError as exc:
+        _fail(str(exc))
+        raise typer.Exit(code=1) from exc
+
+    console.print(
+        f"不变量 {len(seed_config.invariants)} 条，"
+        f"违例 [bold {'red' if failures else 'green'}]{len(failures)}[/bold {'red' if failures else 'green'}] 条"
+    )
+
+    if not failures:
+        console.print("[green]✓ 全部通过[/green]")
+        return
+
+    for failure in failures[:50]:
+        console.print(f"[red]✗[/red] {_plain(failure.describe())}")
+        fields = list(failure.row.items())[:preview]
+        rendered = ", ".join(f"{k}={_plain(v)}" for k, v in fields)
+        console.print(f"    {rendered}")
+    if len(failures) > 50:
+        console.print(f"  ...（其余 {len(failures) - 50} 条省略）")
+
+    raise typer.Exit(code=1)
+
+
+@app.command()
 def ui(
     config: Path | None = typer.Option(None, "-c", "--config", help="启动时载入的配置文件"),
     host: str = typer.Option("127.0.0.1", "--host", help="监听地址（默认仅本机）"),

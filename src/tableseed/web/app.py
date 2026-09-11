@@ -198,6 +198,28 @@ def create_app(config_path: str | None = None) -> FastAPI:
             "cyclic": cyclic,
         }
 
+    @app.post("/api/verify")
+    def verify_invariants(payload: ConfigPayload) -> dict[str, Any]:
+        """生成一份内存数据，逐条求值不变量，返回违例清单。"""
+        try:
+            config = state.parse(payload.text)
+        except TableSeedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if not config.invariants:
+            return {"total": 0, "failures": [], "passed": True}
+
+        try:
+            failures = service.verify(config)
+        except TableSeedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return {
+            "total": len(config.invariants),
+            "passed": not failures,
+            "failures": [f.model_dump() for f in failures],
+        }
+
     # ---------------------------------------------------------------- 生成
 
     @app.post("/api/generate")
