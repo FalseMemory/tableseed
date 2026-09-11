@@ -136,7 +136,8 @@ def test_write_mode_requires_confirmation(client):
 @allure.epic("tableseed")
 @allure.feature("SQL 查询台")
 @allure.story("缺少连接")
-def test_sql_without_dsn_is_rejected(client):
+def test_sql_without_dsn_is_rejected(client, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # 隔离项目根的 config.ini，确保「无任何连接」
     client.put("/api/config", json={"text": CONFIG})
     response = client.post("/api/sql/execute", json={"sql": "SELECT 1"})
     assert response.status_code == 400

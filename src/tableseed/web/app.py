@@ -369,65 +369,58 @@ def create_app(config_path: str | None = None) -> FastAPI:
             "ok": not problems,
         }
 
-    # ---------------------------------------------------------------- 数据库连接
+    # ---------------------------------------------------------------- 数据库连接（config.ini 多连接）
 
-    @app.get("/api/database")
-    def get_database() -> dict[str, Any]:
-        """读取配置里的 database 段（供页面回填连接表单）。"""
-        config = _current_config(state)
-        if config is None or config.database is None:
-            return {"configured": False}
-        spec = config.database
-        return {
-            "configured": True,
-            "type": spec.type or "mysql",
-            "host": spec.host,
-            "port": spec.port,
-            "user": spec.user,
-            "password": spec.password,
-            "password_env": spec.password_env,
-            "database": spec.database,
-            "charset": spec.charset,
-            "url": spec.url,
-            "has_structured": spec.is_structured,
-            "masked": spec.describe(),
-            "password_source": spec.password_source,
-            "env_problem": spec.env_problem(),
-        }
+    @app.get("/api/connections")
+    def get_connections() -> dict[str, Any]:
+        """全部连接 + 当前激活名。回显不含明文密码，只给脱敏串。"""
+        from ..config.connections import ConnectionsStore  # noqa: PLC0415
 
-    @app.put("/api/database")
-    def put_database(payload: DatabasePayload) -> dict[str, Any]:
-        """把连接信息写回 YAML 的 database 段。
+        data = ConnectionsStore().load()
+        connections = {}
+        for name, fields in data["connections"].items():
+            try:
+                spec = DatabaseSpec.model_validate(fields)
+                entry = {**fields, "masked": spec.describe(), "password_source": spec.password_source}
+            except Exception as exc:  # 单条坏数据不影响整体
+                entry = {**fields, "masked": f"(配置有误: {exc})", "password_source": "invalid"}
+            connections[name] = entry
+        return {"active": data["active"], "connections": connections}
 
-        **只替换 database 段**，其余文本（含注释、字段顺序）原样保留 ——
-        用 yaml.dump 重写整个文件会把用户写的注释全丢掉。
-        """
-        section = {
-            k: v
-            for k, v in payload.model_dump().items()
-            if v not in (None, "") and not (k == "charset" and v == "utf8mb4")
-        }
-        block = None
-        if section:
-            section.setdefault("type", "mysql")
-            block = "database:\n" + "\n".join(
-                f"  {k}: {_yaml_scalar(v)}" for k, v in section.items()
-            )
+    @app.put("/api/connections")
+    def put_connection(payload: dict[str, Any]) -> dict[str, Any]:
+        """新增/更新一个连接。name 为连接名，其余为连接字段。"""
+        from ..config.connections import ConnectionsStore  # noqa: PLC0415
 
-        text = _replace_yaml_section(state.text, "database", block)
+        name = payload.get("name")
+        fields = {k: v for k, v in payload.items() if k != "name" and v is not None}
         try:
-            config = state.parse(text)
+            ConnectionsStore().save(name or "", fields)
         except TableSeedError as exc:
-            raise HTTPException(status_code=400, detail=f"写回后配置不合法: {exc}") from exc
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        state.log_operation("保存连接", f"连接 {name}（{spec_mask(fields)}）")
+        return {"ok": True, "masked": spec_mask(fields)}
 
-        state.text = text
-        state.persist(text)
-        return {
-            "text": text,
-            "saved": bool(state.config_path),
-            "path": state.config_path,
-            "masked": config.database.describe() if config.database else "未配置",
-        }
+    @app.post("/api/connections/delete")
+    def delete_connection(payload: dict[str, Any]) -> dict[str, Any]:
+        from ..config.connections import ConnectionsStore  # noqa: PLC0415
+
+        name = payload.get("name") or ""
+        ConnectionsStore().delete(name)
+        state.log_operation("删除连接", f"连接 {name}")
+        return {"ok": True}
+
+    @app.post("/api/connections/active")
+    def set_active_connection(payload: dict[str, Any]) -> dict[str, Any]:
+        from ..config.connections import ConnectionsStore  # noqa: PLC0415
+
+        name = payload.get("name") or ""
+        try:
+            ConnectionsStore().set_active(name)
+        except TableSeedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        state.log_operation("切换连接", f"当前连接 → {name}")
+        return {"ok": True, "active": name}
 
     @app.post("/api/database/test")
     def test_database(payload: DatabasePayload) -> dict[str, Any]:
@@ -584,7 +577,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
         return {"logs": logs, "total": len(state.operation_logs)}
 
     @app.post("/api/insert")
-    def insert_result() -> dict[str, Any]:
+    def insert_result(payload: dict[str, Any]) -> dict[str, Any]:
         """把最近一次生成的结果插入数据库（生成与入库两段式的第二段）。"""
         import time as _time  # noqa: PLC0415
 
@@ -601,20 +594,19 @@ def create_app(config_path: str | None = None) -> FastAPI:
                 "message": "这批数据已经插入过了。如需再插一份，请重新生成（同 seed 会生成同样数据，建议改 seed）",
             }
 
-        config = _current_config(state)
-        spec = config.database if config and config.database else None
-        if spec is None or spec.resolved_url() is None:
+        url = _resolve_url(state, payload.get("dsn"), payload.get("database"))
+        if not url:
             detail = "未配置数据库连接 —— 请在左栏顶部填写并保存连接信息"
             state.log_operation("插入", detail, ok=False)
             raise HTTPException(status_code=400, detail=detail)
 
-        problem = spec.env_problem()
-        if problem:
-            state.log_operation("插入", problem, ok=False)
-            raise HTTPException(status_code=400, detail=problem)
-
-        url = spec.resolved_url()
         from ..sink import DbSink  # noqa: PLC0415
+        from ..models import DatabaseSpec  # noqa: PLC0415
+
+        fields = payload.get("database") or {}
+        spec = DatabaseSpec.model_validate(fields) if fields else (
+            _current_config(state).database if _current_config(state) and _current_config(state).database else DatabaseSpec()
+        )
 
         started = _time.perf_counter()
         try:
@@ -631,14 +623,12 @@ def create_app(config_path: str | None = None) -> FastAPI:
         elapsed = int((_time.perf_counter() - started) * 1000)
         state.inserted_fingerprint = fingerprint
         summary = ", ".join(f"{n} {len(d)} 行" for n, d in result.tables.items())
-        state.log_operation(
-            "插入", f"入库成功（{summary}，{elapsed} ms → {spec.describe()})"
-        )
+        state.log_operation("插入", f"入库成功（{summary}，{elapsed} ms）")
         return {
             "ok": True,
             "elapsed_ms": elapsed,
             "tables": {n: len(d) for n, d in result.tables.items()},
-            "masked": spec.describe(),
+            "masked": _mask_url(url),
             "message": f"插入成功：{summary}",
         }
 
@@ -811,9 +801,10 @@ def _graph_edges(config: SeedConfig) -> list[dict[str, Any]]:
 def _resolve_url(
     state: AppState, dsn: str | None, database: dict[str, Any] | None
 ) -> str | None:
-    """按优先级取连接串：显式 dsn → 页面传的结构化连接 → 配置里的 database 段。
+    """按优先级取连接串：显式 dsn → 页面表单 → config.ini 激活连接 → YAML database 段。
 
-    连接信息来自三处，优先级必须明确 —— 页面当前填的 > 配置里存的。
+    连接信息已迁移到 config.ini（与业务规则分离，配置可随便分享）；
+    YAML 的 database 段仅为兼容旧配置保留，不再推荐。
     """
     if dsn:
         return dsn
@@ -832,6 +823,20 @@ def _resolve_url(
         url = spec.resolved_url()
         if url:
             return url
+
+    # config.ini 里激活的连接
+    from ..config.connections import ConnectionsStore  # noqa: PLC0415
+
+    ini_spec = ConnectionsStore().active_spec()
+    if ini_spec is not None:
+        problem = ini_spec.env_problem()
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+        url = ini_spec.resolved_url()
+        if url:
+            return url
+
+    # 旧配置兼容：YAML 的 database 段
     config = _current_config(state)
     if config and config.database:
         problem = config.database.env_problem()
@@ -863,6 +868,16 @@ def _safe_table_names(conn) -> list[str] | None:
         return sorted(inspect(conn).get_table_names())
     except Exception:  # pragma: no cover
         return None
+
+
+def spec_mask(fields: dict[str, Any]) -> str:
+    """连接字段的脱敏摘要（用于日志与回显）。"""
+    from ..models import DatabaseSpec  # noqa: PLC0415
+
+    try:
+        return DatabaseSpec.model_validate(fields).describe()
+    except Exception:
+        return f"{fields.get('type', 'mysql')}://{fields.get('user', '?')}@{fields.get('host', '?')}/{fields.get('database', '?')}"
 
 
 def _short_db_error(exc: Exception) -> str:
@@ -926,57 +941,11 @@ def _reflect_ddl(url: str, table: str) -> str:
         engine.dispose()
 
 
-def _yaml_scalar(value: Any) -> str:
-    """把一个标量渲染成 YAML 字面量（字符串加引号，数字/布尔原样）。"""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    text = str(value)
-    # 含特殊字符或形如数字的字符串要引起来，避免被 YAML 当成别的类型
-    if re.search(r"[:#\[\]{}&*!|>'\"%@`,\n]|^\s|\s$|^\d", text):
-        return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
-    return text
+def _mask_url(url: str) -> str:
+    """连接串脱敏（密码替换成 ***）。"""
+    import re  # noqa: PLC0415
 
-
-def _replace_yaml_section(text: str, key: str, block: str | None) -> str:
-    """替换顶层 YAML 段的文本，**其余内容一字不动**（保留注释与格式）。
-
-    定位 ``^key:`` 行后，吃掉其后续的缩进行（该段的子内容），再插入新段。
-    段不存在时追加到文件末尾。
-    """
-    lines = text.splitlines()
-    out: list[str] = []
-    index = 0
-    replaced = False
-
-    while index < len(lines):
-        line = lines[index]
-        if re.match(rf"^{re.escape(key)}\s*:", line):
-            index += 1
-            # 吃掉该段的子行（缩进行）；段尾的空行若后面仍是缩进行也算入
-            while index < len(lines):
-                current = lines[index]
-                if current.startswith((" ", "\t")):
-                    index += 1
-                    continue
-                if not current.strip() and index + 1 < len(lines) and lines[index + 1].startswith((" ", "\t")):
-                    index += 1
-                    continue
-                break
-            if block:
-                out.extend(block.splitlines())
-            replaced = True
-            continue
-        out.append(line)
-        index += 1
-
-    if not replaced and block:
-        if out and out[-1].strip():
-            out.append("")
-        out.extend(block.splitlines())
-
-    return "\n".join(out).rstrip("\n") + "\n"
+    return re.sub(r"://([^:/@]+):[^@]*@", r"://\1:***@", url)
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:

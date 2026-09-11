@@ -121,6 +121,12 @@
   .db-msg.ok { color: var(--ok); border-color: rgba(63,185,80,.35); background: rgba(63,185,80,.08); }
   .db-msg.err { color: var(--err); border-color: rgba(248,81,73,.35); background: rgba(248,81,73,.08); }
   .db-msg ul { margin: 4px 0 0; padding-left: 16px; }
+  .log-detail-btn { padding: 2px 8px; font-size: 11px; margin-left: 4px; }
+  dialog {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 10px; padding: 18px 20px; box-shadow: 0 8px 40px rgba(0,0,0,.5);
+  }
+  dialog::backdrop { background: rgba(0,0,0,.55); }
   textarea.sqlbox {
     width: 100%; height: 110px; background: var(--panel); border: 1px solid var(--line);
     border-radius: 8px; padding: 10px 12px; color: var(--text); font-family: var(--mono); font-size: 13px; resize: vertical;
@@ -165,7 +171,7 @@
       <span class="chip" id="write-chip">只读查询</span>
     </div>
 
-    <!-- 数据库连接：全局共用（SQL 台、造数入库、建表语句都走这里） -->
+    <!-- 数据库连接：config.ini 多连接，全局共用（SQL 台、造数入库、建表语句都走这里） -->
     <div class="db-panel">
       <div class="db-head" id="db-toggle">
         <span class="caret" id="db-caret">▾</span>
@@ -173,10 +179,17 @@
         <span class="chip" id="db-state">未配置</span>
         <span class="spacer"></span>
         <button id="btn-db-test">测试连接</button>
-        <button id="btn-db-save">保存到配置</button>
       </div>
       <div class="db-body" id="db-body">
+        <div class="row" style="margin-bottom:6px">
+          <span class="hint">连接</span>
+          <select id="db-conn-select" style="flex:1"><option value="">— 选择已有连接 —</option></select>
+          <button id="btn-db-apply" title="切换到该连接">切换</button>
+          <button id="btn-db-del" title="删除该连接">删除</button>
+        </div>
         <div class="db-grid">
+          <input type="text" id="db-conn-name" placeholder="连接名（保存时用）">
+          <input type="text" id="db-type-list" hidden>
           <select id="db-type">
             <option value="mysql">MySQL</option>
             <option value="postgresql">PostgreSQL</option>
@@ -194,7 +207,7 @@
         <div class="db-foot">
           <span class="hint" id="db-masked"></span>
           <span class="spacer"></span>
-          <button id="btn-db-load">读取配置</button>
+          <button id="btn-db-save">保存连接</button>
         </div>
       </div>
     </div>
@@ -460,18 +473,25 @@ function renderGraph(g) {
     const x2 = b.x, y2 = b.y + NODE_H / 2;
     const mx = (x1 + x2) / 2;
     const isAgg = e.modes.includes("aggregate");
-    svg += `<path class="g-edge${isAgg ? " agg" : ""}" d="M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}" marker-end="url(#arrow)"/>`;
+    // aggregate 反向边（子 → 父）向下弯出独立弧线 —— 否则与正向边完全重叠，
+    // 基数标签与传播模式文字会叠在一起
+    const bend = isAgg ? 52 : 0;
+    const cy = (yy) => yy + bend;
+    svg += `<path class="g-edge${isAgg ? " agg" : ""}" d="M ${x1} ${y1} C ${mx} ${cy(y1)}, ${mx} ${cy(y2)}, ${x2} ${y2}" marker-end="url(#arrow)"/>`;
+
+    // 标签锚点：直边取中点，弧边取弧线中点（约 0.75 倍弯度处）
+    const midY = (y1 + y2) / 2 + bend * 0.75;
 
     // 基数标签
     const label = `${e.cardinality}${e.existence === "conditional" ? "?" : ""}`;
     const lw = label.length * 7 + 12;
-    svg += `<rect class="g-card" x="${mx - lw / 2}" y="${(y1 + y2) / 2 - 9}" width="${lw}" height="17" rx="8"/>`;
-    svg += `<text class="g-card-text" x="${mx}" y="${(y1 + y2) / 2 + 3.5}" text-anchor="middle">${escapeHtml(label)}</text>`;
+    svg += `<rect class="g-card" x="${mx - lw / 2}" y="${midY - 9}" width="${lw}" height="17" rx="8"/>`;
+    svg += `<text class="g-card-text" x="${mx}" y="${midY + 3.5}" text-anchor="middle">${escapeHtml(label)}</text>`;
 
     // 传播模式徽章（贴在边中点偏下）
     const modes = e.modes.filter((m) => m !== "free").map((m) => MODE_LABEL[m] || m).join("/");
     if (modes) {
-      svg += `<text class="g-node-meta" x="${mx}" y="${(y1 + y2) / 2 + 22}" text-anchor="middle">${escapeHtml(modes)}</text>`;
+      svg += `<text class="g-node-meta" x="${mx}" y="${midY + 22}" text-anchor="middle">${escapeHtml(modes)}</text>`;
     }
   });
 
@@ -567,6 +587,7 @@ const GROUP_KEYS = {
 };
 
 const editState = { view: null, tableIndex: 0 };
+let editConnections = { active: null, connections: {} };
 
 async function loadEditor() {
   const body = $("editor-body");
@@ -929,43 +950,72 @@ async function testDatabase() {
 
 async function loadDatabase() {
   try {
-    const d = await api("/api/database");
-    if (!d.configured) { dbStatus("未配置（内存模式）"); return; }
-    $("db-type").value = d.type || "mysql";
-    $("db-host").value = d.host || "";
-    $("db-port").value = d.port || "";
-    $("db-user").value = d.user || "";
-    $("db-password").value = d.password || "";
-    $("db-password-env").value = d.password_env || "";
-    $("db-name").value = d.database || "";
-    $("db-charset").value = d.charset || "";
-    $("db-masked").textContent = d.masked || "";
-    if (d.env_problem) {
-      dbMessage("err", d.env_problem);
-      dbStatus("密码环境变量未就绪");
-    } else {
-      dbMessage(null);
-      dbStatus("已从配置读取", "on");
-    }
+    const d = await api("/api/connections");
+    editConnections = d;
+    const select = $("db-conn-select");
+    const names = Object.keys(d.connections);
+    select.innerHTML = '<option value="">— 选择已有连接 —</option>'
+      + names.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}${n === d.active ? " ✓" : ""}</option>`).join("");
+    if (d.active) select.value = d.active;
+    dbStatus(names.length ? `${names.length} 个连接，当前：${d.active}` : "未配置（可在 config.ini 保存多个连接）");
   } catch (e) {
     dbStatus("读取失败");
   }
 }
 
-async function saveDatabase() {
-  const f = dbForm();
-  const empty = !f.host && !f.user && !f.database;
-  if (!empty && !dbReady()) {
-    dbMessage("err", "地址、用户名、数据库名为必填（或全部留空以清除配置）");
-    return;
-  }
+function applyConnection(name) {
+  const conn = (editConnections.connections || {})[name];
+  if (!conn) return;
+  $("db-conn-name").value = name;
+  $("db-type").value = conn.type || "mysql";
+  $("db-host").value = conn.host || "";
+  $("db-port").value = conn.port || DB_DEFAULT_PORT[conn.type || "mysql"] || "";
+  $("db-user").value = conn.user || "";
+  $("db-password").value = conn.password || "";
+  $("db-password-env").value = conn.password_env || "";
+  $("db-name").value = conn.database || "";
+  $("db-charset").value = conn.charset || "";
+  $("db-masked").textContent = conn.masked || "";
+  dbMessage(null);
+  dbStatus(`已切换到 ${name}`, "on");
+}
+
+async function switchConnection(name) {
   try {
-    const res = await api("/api/database", { method: "PUT", body: JSON.stringify(f) });
-    $("yaml").value = res.text;           // 左栏同步（含 database 段）
+    await api("/api/connections/active", { method: "POST", body: JSON.stringify({ name }) });
+    applyConnection(name);
+    setStatus(`当前连接：${name}`);
+  } catch (e) {
+    dbMessage("err", e.message);
+  }
+}
+
+async function saveConnection() {
+  const f = dbForm();
+  const name = $("db-conn-name").value.trim();
+  if (!name) { dbMessage("err", "请填写连接名（保存到 config.ini 的段名）"); return; }
+  if (!dbReady()) { dbMessage("err", "地址、用户名、数据库名为必填"); return; }
+  try {
+    const body = { name, ...f };
+    const res = await api("/api/connections", { method: "PUT", body: JSON.stringify(body) });
+    dbMessage("ok", `连接 ${name} 已保存到 config.ini — ${res.masked}`);
     $("db-masked").textContent = res.masked;
-    dbMessage("ok", `已保存${res.saved ? "到 " + res.path : "（仅内存）"}`);
-    dbStatus(res.saved ? "已保存到 " + res.path : "已保存（仅内存）", "on");
-    await validate(true);
+    dbStatus(`已保存 ${name}`, "on");
+    await loadDatabase();          // 刷新下拉
+    $("db-conn-select").value = name;
+  } catch (e) {
+    dbMessage("err", e.message);
+  }
+}
+
+async function deleteConnection() {
+  const name = $("db-conn-select").value;
+  if (!name) { dbMessage("err", "请先在下拉中选择要删除的连接"); return; }
+  try {
+    await api("/api/connections/delete", { method: "POST", body: JSON.stringify({ name }) });
+    dbMessage("ok", `连接 ${name} 已删除`);
+    $("db-conn-name").value = "";
+    await loadDatabase();
   } catch (e) {
     dbMessage("err", e.message);
   }
@@ -1059,15 +1109,34 @@ async function loadLogs() {
   try {
     const res = await api("/api/logs?limit=300");
     if (!res.logs.length) { body.innerHTML = '<div class="empty">暂无操作记录。</div>'; return; }
-    const rows = res.logs.map((l) => ({
-      "时间": l.time,
-      "操作": l.kind,
-      "详情": l.detail,
-      "结果": l.ok ? "成功" : "失败",
-    }));
+    const TRUNC = 90;
+    const rows = res.logs.map((l, i) => {
+      const short = l.detail.length > TRUNC ? l.detail.slice(0, TRUNC) + "…" : l.detail;
+      const viewBtn = l.detail.length > TRUNC
+        ? ` <button class="log-detail-btn" data-i="${i}">详情</button>` : "";
+      return [l.time, l.kind,
+        `<span title="${escapeHtml(l.detail)}">${escapeHtml(short)}</span>${viewBtn}`,
+        l.ok ? "成功" : "失败"];
+    });
     body.innerHTML =
       `<div class="stats"><div class="stat"><div class="k">累计操作</div><div class="v">${res.total}</div></div></div>`
-      + tableHtml(["时间", "操作", "详情", "结果"], rows.map((r) => [r["时间"], r["操作"], r["详情"], r["结果"]]));
+      + tableHtml(["时间", "操作", "详情", "结果"], rows)
+      + `<dialog id="log-dialog" style="max-width:720px">
+           <div style="margin-bottom:10px;font-weight:600">操作详情</div>
+           <pre id="log-dialog-content" style="white-space:pre-wrap;word-break:break-all;font-size:12.5px;line-height:1.6"></pre>
+           <div style="text-align:right;margin-top:12px">
+             <button onclick="this.closest('dialog').close()">关闭</button>
+           </div>
+         </dialog>`;
+    // 超长详情的「详情」按钮 → 弹窗展示全文
+    document.querySelectorAll(".log-detail-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const log = res.logs[+btn.dataset.i];
+        $("log-dialog-content").textContent =
+          `[${log.time}] ${log.kind}\n${log.detail}\n结果: ${log.ok ? "成功" : "失败"}`;
+        $("log-dialog").showModal();
+      });
+    });
   } catch (e) {
     body.innerHTML = msg("err", e.message);
   }
@@ -1087,9 +1156,18 @@ $("btn-sql-ddl").addEventListener("click", fetchDDL);
 $("btn-editor-save").addEventListener("click", saveEditor);
 $("btn-editor-load").addEventListener("click", loadEditorFromLeft);
 $("btn-logs-refresh").addEventListener("click", loadLogs);
-$("btn-db-load").addEventListener("click", loadDatabase);
-$("btn-db-save").addEventListener("click", saveDatabase);
+$("btn-db-load")?.remove();
+$("btn-db-save").addEventListener("click", saveConnection);
 $("btn-db-test").addEventListener("click", testDatabase);
+$("btn-db-apply").addEventListener("click", () => {
+  const name = $("db-conn-select").value;
+  if (!name) { dbMessage("err", "请先在下拉中选择连接"); return; }
+  switchConnection(name);
+});
+$("btn-db-del").addEventListener("click", deleteConnection);
+$("db-conn-select").addEventListener("change", (e) => {
+  if (e.target.value) switchConnection(e.target.value);   // 选中即切换（含回填）
+});
 
 // 折叠 / 展开数据库连接面板（点面板上的按钮不触发）
 $("db-toggle").addEventListener("click", (e) => {

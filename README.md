@@ -493,30 +493,36 @@ t_account     枚举组: g_status(2) × g_currency(2) × g_channel(3) = 12 组�
 
 # 数据库连接
 
-出现在配置里即**直连入库**（不写 `database` 段则纯内存模式，不落盘）。
+连接信息存于项目根的 **config.ini**（与业务配置分离 —— 造数 YAML 可以随便分享、入库），
+支持**多个连接**，页面上随时切换。参考 [config.ini.example](config.ini.example)：
 
-页面上（SQL 查询台）按行填写即可，也能从 YAML 读回：
+```ini
+[general]
+active = demo              ; 当前使用的连接
 
-```yaml
-database:
-  type: mysql                 # mysql / postgresql / oracle
-  host: 127.0.0.1
-  port: 3306                  # 不填按类型取默认（3306 / 5432 / 1521）
-  user: root
-  password_env: TABLESEED_DB_PASSWORD   # 密码走环境变量 —— 推荐
-  database: testdb
-  charset: utf8mb4
+[demo]
+type = mysql               ; mysql / postgresql / oracle
+host = 127.0.0.1
+port = 3306                ; 不填按类型取默认（3306 / 5432 / 1521）
+user = root
+password_env = TABLESEED_DB_PASSWORD   ; 密码走环境变量 —— 推荐
+database = tableseed_demo
+
+[prod]
+type = mysql
+host = 10.0.0.5
+user = root
+password = ...             # 也可明文（不推荐，注意不要提交到版本库）
+database = biz_db
 ```
 
-- **密码优先取环境变量**（`password_env`），其次才是明文 `password`。
-  只写变量名的话，配置文件可以安全入库；页面回显一律脱敏（`***`）。
-  环境变量未设置时会明确报出来，并给出 `setx` 的写法 —— 不会让你对着
-  「Access denied ... using password: NO」猜半天。
-- 密码里的 `@ : / #` 会自动做 URL 编码，不会把连接串拼坏。
-- 也可以直接给完整连接串：`url: mysql+pymysql://user:pwd@host:3306/db`（优先级最高）。
-- 保存连接信息时**只替换 `database` 段**，配置里其余的注释与格式原样保留。
+- **密码优先取环境变量**（`password_env`），其次才是明文 `password`；
+  页面回显一律脱敏。环境变量未设置时会明确报出来并给出 `setx` 写法，
+  不会让你对着「Access denied ... using password: NO」猜半天。
+- 密码里的 `@ : / #` 自动做 URL 编码，不会把连接串拼坏。
+- 页面「测试连接」试连一次，直接告诉你是密码错还是连不上。
+- YAML 里的 `database` 段仍兼容（老配置不用改），但**推荐迁移到 config.ini**。
 
-示例：[samples/txn-mysql.yaml](samples/txn-mysql.yaml)（带连接段，密码走环境变量）。
 
 # 设计原则
 

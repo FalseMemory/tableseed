@@ -1,0 +1,23 @@
+# tableseed 数据库连接配置（复制为 config.ini 后使用）
+# 密码推荐走环境变量：password_env 只写变量名，本文件不含明文密码
+# 类型支持：mysql / postgresql / oracle；端口缺省按类型取 3306 / 5432 / 1521
+
+[general]
+active = demo
+
+[demo]
+type = mysql
+host = 127.0.0.1
+port = 3306
+user = root
+password_env = TABLESEED_DB_PASSWORD
+database = tableseed_demo
+charset = utf8mb4
+
+# 可以放多个连接，页面上随时切换：
+# [prod]
+# type = mysql
+# host = 10.0.0.5
+# user = root
+# password_env = PROD_DB_PASSWORD
+# database = biz_db
