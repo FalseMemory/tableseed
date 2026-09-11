@@ -35,6 +35,7 @@ from .allocator import ComboAllocator, drive_fields_of
 from .coverage import expand_by_strategy
 from .group_expander import attach_groups, combo_count, expand_skeleton, finite_groups
 from .propagator import apply_propagate, build_env, effective_rules
+from .splitter import split_value
 
 _DATE_FORMATS = ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d", "%Y-%m-%d %H:%M:%S")
 
@@ -125,16 +126,42 @@ def generate_child(
 
     rows: list[GeneratedRow] = []
     truncated = False
-    theoretical = len(parent_data) * (
-        1 if _is_one_to_one(relation) else max(per_parent_combos, 1)
-    )
+    if rules and any(r.mode == "split" for r in rules):
+        per_parent = max(_split_parts_of(next(r for r in rules if r.mode == "split")), 1)
+    else:
+        per_parent = 1 if _is_one_to_one(relation) else max(combo_count(finite), 1)
+    theoretical = len(parent_data) * per_parent
 
     for parent_row in parent_data.rows:
         if not _should_exist(relation, parent_row, funcs):
             continue
 
+        # split 模式：行数由 parts 决定（每父行恰好 parts 行），需要预先拆好各份金额
+        split_rule = next((r for r in rules if r.mode == "split"), None)
+        split_pieces: dict[str, list] | None = None
+        part_count = 0
+        if split_rule is not None:
+            part_count = _split_parts_of(split_rule)
+            split_pieces = {}
+            for rule in (r for r in rules if r.mode == "split"):
+                total = parent_row.values.get(rule.from_)  # from_ 已由 checker 保证存在
+                scale = _scale_of(config, table, rule.to)
+                split_pieces[rule.to] = split_value(
+                    total,
+                    part_count,
+                    rng,
+                    scale=scale,
+                    ratio=rule.ratio,
+                    path=f"tables[{table.name}].propagate({rule.mode}→{rule.to})",
+                )
+
         skeletons: Iterator[dict[str, Any]]
-        if _is_one_to_one(relation):
+        part_total = 1
+        if split_rule is not None:
+            # 拆分模式：每父行恰好 parts 行，骨架为空（行数不来自笛卡尔积）
+            skeletons = iter([{} for _ in range(part_count)])
+            part_total = part_count
+        elif _is_one_to_one(relation):
             # 1:1 —— 分配一个组合，行数不放大
             skeletons = iter([allocator.assign(parent_row.values, len(rows))])
         else:
@@ -147,6 +174,7 @@ def generate_child(
                     finite, strategy, config.limits.sample_size, rng, max_rows
                 ) or iter([{}])
 
+        part_index = 0
         for skeleton in skeletons:
             seq = len(rows)
             values = _build_row(
@@ -154,8 +182,16 @@ def generate_child(
             )
 
             apply_propagate(
-                rules, values, parent_row.values, funcs, f"tables[{table.name}]", seq
+                rules,
+                values,
+                parent_row.values,
+                funcs,
+                f"tables[{table.name}]",
+                seq,
+                split_pieces=split_pieces,
+                part_index=part_index if split_rule is not None else 0,
             )
+            part_index += 1
 
             env = build_env(values, parent_row.values, seq)
             if any(expr(env) for expr in excludes):
@@ -180,6 +216,24 @@ def generate_child(
 
 def _is_one_to_one(relation: RelationSpec) -> bool:
     return relation.cardinality in {"1:1", "1:0..1"}
+
+
+def _split_parts_of(rule) -> int:
+    """split 规则的份数：优先 parts，否则 ratio 的项数。"""
+    if rule.parts:
+        return rule.parts
+    if rule.ratio:
+        return len(rule.ratio)
+    return 0
+
+
+def _scale_of(config: SeedConfig, table: TableSpec, field: str) -> int:
+    """拆分精度取自列声明的 scale（缺省 2，即「分」）。"""
+    if table.columns:
+        for column in table.columns:
+            if column.name == field and column.scale is not None:
+                return column.scale
+    return 2
 
 
 def _allocation_of(finite: list[GroupSpec]) -> str:

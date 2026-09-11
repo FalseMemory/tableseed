@@ -7,7 +7,7 @@ from .group_expander import (
     expand_skeleton,
     finite_groups,
 )
-from .invariants import InvariantFailure, verify_invariants
+from .invariants import verify_invariants
 from .multi import generate_all
 from .propagator import apply_propagate, build_env, effective_rules
 from .table_gen import generate_child, generate_table
@@ -15,7 +15,6 @@ from .topology import back_edges, topo_order
 
 __all__ = [
     "ComboAllocator",
-    "InvariantFailure",
     "apply_propagate",
     "attach_groups",
     "back_edges",

@@ -204,7 +204,16 @@ def _check_relations(config: SeedConfig) -> list[str]:
                     problems.append(
                         f"{path}: 子表 {relation.child} 中不存在字段 {key.child_field}"
                     )
-            problems.extend(_check_propagate(config, relation, index, child_fields, parent_fields))
+            problems.extend(
+                _check_propagate(
+                    config,
+                    relation,
+                    index,
+                    child_fields,
+                    parent_fields,
+                    config.table(relation.child),
+                )
+            )
 
     return problems
 
@@ -215,6 +224,7 @@ def _check_propagate(
     index: int,
     child_fields: set[str],
     parent_fields: set[str],
+    child_table: TableSpec,
 ) -> list[str]:
     """逐条校验传播规则 —— 「字段要对得上」最容易在这里写错。"""
     problems: list[str] = []
@@ -258,7 +268,7 @@ def _check_propagate(
                 )
 
         if rule.mode == "split":
-            problems.append(f"{path}: split 传播（父子金额拆分）计划在 M4 支持")
+            problems.extend(_check_split(config, relation, rule, path, child_table))
 
     return problems
 
@@ -402,6 +412,40 @@ def _check_aggregate(
             f"{group_path}: 聚合需要锚点，"
             f"但关系 {table.name} → {children[0].child} 未声明 join"
         )
+    return problems
+
+
+def _check_split(config: SeedConfig, relation, rule, path: str, child_table: TableSpec) -> list[str]:
+    """split 拆分的静态校验：份数声明、占比合法性、行数语义冲突。"""
+    problems: list[str] = []
+
+    if not rule.parts and not rule.ratio:
+        problems.append(f"{path}: split 必须声明 parts（份数）或 ratio（占比）之一")
+    if rule.parts is not None and rule.parts < 1:
+        problems.append(f"{path}: split 的 parts 必须 >= 1")
+    if rule.ratio:
+        if any(r <= 0 for r in rule.ratio):
+            problems.append(f"{path}: split 的 ratio 每项必须 > 0")
+        total = sum(rule.ratio)
+        if abs(total - 1) > 0.001:
+            problems.append(f"{path}: split 的 ratio 之和应为 1，当前为 {total:.4f}")
+    if rule.parts and rule.ratio and len(rule.ratio) != rule.parts:
+        problems.append(
+            f"{path}: split 的 ratio 有 {len(rule.ratio)} 项，与 parts={rule.parts} 不一致"
+        )
+
+    # 行数语义：split 的行数 = 父行数 × 份数，与子表有限组的笛卡尔积展开冲突
+    if finite_groups(child_table):
+        problems.append(
+            f"{path}: split 模式下子表 {relation.child} 的行数由份数决定，"
+            "不能再声明有限取值组（请把该组改为 random / derive 等逐行组）"
+        )
+    if relation.cardinality in {"1:1", "1:0..1"} and (rule.parts or 0) > 1:
+        problems.append(
+            f"{path}: 1:1 关系下每条父行只有一条子行，无法拆成 {rule.parts} 份"
+            "（请改用 1:N）"
+        )
+
     return problems
 
 

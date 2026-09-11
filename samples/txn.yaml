@@ -132,6 +132,19 @@ tables:
           - ["系统自动"]
           - ["柜员录入"]
 
+  # ============================================== 子表：交易分录（split 拆分）
+  - name: t_txn_item
+    columns:
+      - {name: txn_no, type: string}
+      - {name: item_amt, type: decimal, scale: 2}
+      - {name: memo, type: string}
+
+    groups:
+      - type: const
+        name: g_memo
+        fields: [memo]
+        value: ["记账分录"]
+
   # ============================================== 子表：操作日志（1:N）
   - name: t_txn_log
     columns:
@@ -183,6 +196,17 @@ relations:
       - {parent_field: txn_no, child_field: txn_no}   # 自动补齐 copy
     propagate: []                                     # 除主键外无其他字段需要对上
 
+  # ---------------------------------------------- 交易 → 分录（split 拆分）
+  # 每笔交易金额拆成 2 笔分录，Σ分录 = 交易金额（割点法拆分，零误差）
+  - parent: t_txn
+    child: t_txn_item
+    cardinality: "1:N"
+    existence: required
+    join:
+      - {parent_field: txn_no, child_field: txn_no}
+    propagate:
+      - {mode: split, to: item_amt, from: amount, parts: 2}
+
 # ============================================================ 不变量
 # 把「对得上」声明成可校验的断言；tableseed verify 逐条求值并列出违例行
 invariants:
@@ -199,3 +223,8 @@ invariants:
   - table: t_txn
     from: t_txn_log
     expr: "count() = 3"
+
+  # split 守恒：分录金额合计 = 交易金额
+  - table: t_txn
+    from: t_txn_item
+    expr: "sum(item_amt) = amount"

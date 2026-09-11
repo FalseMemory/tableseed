@@ -473,6 +473,11 @@ function renderResult(data) {
   let html = stats;
   const warns = data.warnings || [];
   if (warns.length) html += msg("warn", `${warns.length} 条提示`, warns);
+  const invFails = data.invariant_failures || [];
+  if (invFails.length) {
+    html += msg("err", `生成后自检: ${invFails.length} 行不变量违例`,
+      invFails.slice(0, 5).map((f) => `${f.expr} @ ${f.table}#${f.seq}`));
+  }
   for (const name of names) {
     const t = data.tables[name];
     html += `<div class="pane-head" style="padding:10px 0;border:0">

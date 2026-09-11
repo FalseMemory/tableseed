@@ -170,6 +170,11 @@ class PropagateRule(_Model):
     # map 模式：父值未命中 mapping 时的兜底值；不提供则视为配置错误并报错
     default: Any = None
 
+    # split 模式：父值拆分到 N 个子行，Σ子 = 父。
+    # parts = 拆几份；ratio = 各份占比（和为 1，最后一份兜差保守恒）。二者给一即可。
+    parts: int | None = None
+    ratio: list[float] | None = None
+
 
 class RelationSpec(_Model):
     """表间关系四要素：基数 / 存在性 / 锚点 / 传播。"""
@@ -300,6 +305,19 @@ class TableData(_Model):
         return render_csv(self, path=path)
 
 
+class InvariantFailure(_Model):
+    """一条不变量的违例明细（生成后自检 / verify 共用）。"""
+
+    index: int           # 第几条不变量（0 起）
+    expr: str            # 断言原文
+    table: str           # 在哪张表上违例
+    seq: int             # 违例行序号
+    row: dict[str, Any]  # 违例行的完整值
+
+    def describe(self) -> str:
+        return f"invariants[{self.index}] {self.expr!r} 违例 @ {self.table}#{self.seq}"
+
+
 class GenerateResult(_Model):
     """一次生成的完整结果。"""
 
@@ -309,6 +327,9 @@ class GenerateResult(_Model):
 
     #: 生成过程中的非致命提示（如「有 N 行父数据在子表中没有匹配行」）
     warnings: list[str] = Field(default_factory=list)
+
+    #: 生成后自检的违例清单（配置未声明 invariants 时为空；空即通过）
+    invariant_failures: list[InvariantFailure] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------- 预演结果

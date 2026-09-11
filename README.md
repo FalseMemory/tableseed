@@ -194,8 +194,8 @@ relations:
 | `copy` | 父字段原值照抄到子字段 | ✅ M2 | `currency`、`txn_date`、`acct_no` 两表一致 |
 | `derive` | 父字段经表达式/函数变换后写入子字段 | ✅ M2 | `detail_amt = parent.amount × 0.7` |
 | `map` | 父表码值经映射表转换为子表码值 | ✅ M2 | 父 `txn_type` → 子 `detail_type` |
-| `split` | 父的一个值拆分到 N 个子行，满足 Σ子 = 父 | M4 | 一笔 1000 拆成 3 笔明细，合计仍是 1000 |
-| `aggregate` | **反向**：父字段由子表汇总得出 | M3 | 父 `detail_count` = 子表行数 |
+| `split` | 父的一个值拆分到 N 个子行，满足 Σ子 = 父 | ✅ M4 | 一笔 1000 拆成 3 笔明细，合计仍是 1000 |
+| `aggregate` | **反向**：父字段由子表汇总得出 | ✅ M3 | 父 `detail_count` = 子表行数 |
 | `free` | 子表自由生成，仅受自身分组规则约束 | ✅ M2 | 备注、随机附言 |
 
 ```yaml
@@ -208,6 +208,25 @@ propagate:
      mapping: {T: TRANSFER, D: DEPOSIT, W: WITHDRAW}}
   - {mode: free,    to: remark}
 ```
+
+#### `split` 的守恒保证（M4）
+
+```yaml
+- parent: t_txn
+  child: t_txn_item
+  cardinality: "1:N"
+  join: [{parent_field: txn_no, child_field: txn_no}]
+  propagate:
+    - {mode: split, to: item_amt, from: amount, parts: 2}
+    # 或按占比: {mode: split, to: item_amt, from: amount,
+    #            ratio: [0.5, 0.3, 0.2]}
+```
+
+- **分单位整数 + 割点法**：金额先换成「分」（scale 取自列声明），取不重复割点切份 ——
+  每份为正、Σ 恒等于父值，50 份 999999.99 也零误差
+- `ratio` 模式最后一份兜差，占比声明得再怪守恒也不破
+- 行数语义：split 模式下子表行数 = 父行数 × 份数，**子表不能再有有限取值组**
+  （checker 会拦下这个冲突）；配合 invariants `sum(item_amt) = amount` 可自动证明守恒
 
 两条省事的设计：
 
@@ -485,9 +504,9 @@ t_account     枚举组: g_status(2) × g_currency(2) × g_channel(3) = 12 组�
 
 - [x] **M1** 分组模型 + 单表笛卡尔积展开 + 执行策略（直连/内存）+ CLI + **WebUI 最小闭环**（配置→预演→生成→预览）+ SQL 查询台
 - [x] **M2** 表间关系内核 + WebUI 关系图：四要素 + `copy`/`derive`/`map`/`free` 传播 + 拓扑排序 + 1:1 分配策略 + `ref` 组
-- [x] **M3** `aggregate` 两阶段回填 + `invariants` 不变量校验（`tableseed verify` / 页面「验证不变量」）
-- [ ] M3 收尾：覆盖策略（pairwise / sample）+ 覆盖度视图
-- [ ] **M4** `split` 拆分模式 + 流式生成 + 生成后自检 + 多父（N:M）
+- [x] **M3** `aggregate` 两阶段回填 + `invariants` 不变量校验 + 覆盖策略（full / pairwise / sample）+ 组合覆盖度
+- [x] **M4** `split` 拆分传播（Σ子=父 割点法零误差守恒）+ 生成后自检（gen 自动跑 invariants）
+- [ ] M4 收尾：多父（N:M）
 - [ ] **M5** 打磨与集成：打包分发、Python API 稳定化、与测试平台集成
 
 # 技术选型
@@ -505,7 +524,9 @@ t_account     枚举组: g_status(2) × g_currency(2) × g_channel(3) = 12 组�
 
 # 状态
 
-M1（单表内核 + WebUI 闭环）、M2（表间关系内核 + 关系图）、M3（aggregate 两阶段回填 + 不变量校验）已完成，**162 条测试通过**。
+M1–M4 内核全部完成（单表、表间关系、aggregate 回填、不变量、覆盖策略、split 拆分、生成后自检），**188 条测试通过**。仅剩 M4 收尾的多父（N:M）与 M5 打磨。
+
+生成结束会自动跑「生成后自检」：配置里声明了 `invariants` 就逐条求值，CLI 显示 `✓ 自检: 3 条不变量全部通过`（或违例明细），WebUI 结果页同样展示。
 
 ```bash
 tableseed check -c samples/txn.yaml   # 校验：分组完备性 / 依赖环 / 字段引用

@@ -239,13 +239,6 @@ def test_user_rule_wins_over_join():
     assert rules[0].mode == "derive"
 
 
-@allure.story("split 传播尚未支持")
-def test_split_not_supported_yet():
-    funcs = build_functions(SeededRandom(1))
-    with pytest.raises(GenerateError, match="M4"):
-        apply_propagate([_rule("split", "amount")], {}, {"amount": 1}, funcs)
-
-
 # ---------------------------------------------------------------- 行数
 
 

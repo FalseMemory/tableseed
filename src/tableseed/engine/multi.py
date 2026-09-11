@@ -86,11 +86,24 @@ def generate_all(
         if progress:
             progress("phase2_done", {"tables": [p for _, p in back_edges(config)]})
 
+    # ---- Phase 3：生成后自检 —— 配置里声明了 invariants 就逐条求值 ----
+    # 违例不阻断结果（数据已生成），但会随结果返回、由 CLI / WebUI 醒目展示
+    invariant_failures = []
+    if config.invariants:
+        from .invariants import verify_invariants  # noqa: PLC0415
+
+        invariant_failures = verify_invariants(
+            config, tables, build_functions(base_rng)
+        )
+
     elapsed_ms = int((time.perf_counter() - started) * 1000)
-    result = GenerateResult(
-        tables=tables, elapsed_ms=elapsed_ms, seed=config.seed, warnings=result_warnings
+    return GenerateResult(
+        tables=tables,
+        elapsed_ms=elapsed_ms,
+        seed=config.seed,
+        warnings=result_warnings,
+        invariant_failures=invariant_failures,
     )
-    return result
 
 
 def _reject_multi_parent(config: SeedConfig) -> None:

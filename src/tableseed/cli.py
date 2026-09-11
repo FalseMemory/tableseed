@@ -159,6 +159,23 @@ def gen(
         f"耗时 {result.elapsed_ms} ms　种子 {result.seed}　去向：{sink.describe()}"
     )
 
+    # ---- 生成后自检：不变量违例醒目展示 ----
+    if seed_config.invariants:
+        failures = result.invariant_failures
+        if failures:
+            console.print(
+                f"[bold red]✗ 自检: {len(seed_config.invariants)} 条不变量, "
+                f"{len(failures)} 行违例[/bold red]"
+            )
+            for failure in failures[:10]:
+                console.print(f"    {_plain(failure.describe())}")
+            if len(failures) > 10:
+                console.print(f"    ...（其余 {len(failures) - 10} 条省略）")
+        else:
+            console.print(
+                f"[green]✓ 自检: {len(seed_config.invariants)} 条不变量全部通过[/green]"
+            )
+
     for name, data in result.tables.items():
         if not data.rows or preview <= 0:
             continue

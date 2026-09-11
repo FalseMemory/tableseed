@@ -10,8 +10,8 @@ import time
 from pathlib import Path
 
 from .config import check_config, load_config, load_config_from_text
-from .engine import InvariantFailure, generate_all, verify_invariants
-from .models import GenerateResult, PlanResult, SeedConfig
+from .engine import generate_all, verify_invariants
+from .models import GenerateResult, InvariantFailure, PlanResult, SeedConfig
 from .plan import plan_tables
 from .rng import SeededRandom
 from .sink import resolve_sink

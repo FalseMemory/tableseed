@@ -109,6 +109,9 @@ class AppState:
             "seed": result.seed,
             "elapsed_ms": result.elapsed_ms,
             "warnings": list(getattr(result, "warnings", []) or []),
+            "invariant_failures": [
+                f.model_dump() for f in getattr(result, "invariant_failures", []) or []
+            ],
             "tables": {
                 name: {
                     "columns": data.columns,

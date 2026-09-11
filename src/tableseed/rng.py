@@ -44,6 +44,10 @@ class SeededRandom:
             return self._rng.choices(candidates, weights=weights, k=1)[0]
         return self._rng.choice(candidates)
 
+    def rand_sample(self, population, k: int) -> list:
+        """无放回抽样 k 个（用于 split 的割点法）。"""
+        return self._rng.sample(list(population), k)
+
     def rand_uuid(self) -> str:
         """确定性 UUID —— 由种子派生，保证可复现。"""
         return str(_uuid.UUID(int=self._rng.getrandbits(128), version=4))

@@ -52,9 +52,17 @@ def apply_propagate(
     funcs: dict,
     path: str = "",
     seq: int = 0,
+    split_pieces: dict[str, list] | None = None,
+    part_index: int = 0,
 ) -> None:
-    """把父行的值按规则写入子行（原地修改 ``child_values``）。"""
+    """把父行的值按规则写入子行（原地修改 ``child_values``）。
+
+    ``split_pieces`` / ``part_index``：split 拆分由调用方先算好各份金额
+    （见 :func:`table_gen.generate_child`），这里只负责按份取值写入 ——
+    拆分算法与传播解耦。
+    """
     parent_values = dict(parent_values or {})
+    split_pieces = split_pieces or {}
 
     for index, rule in enumerate(rules):
         rule_path = f"{path}.propagate[{index}]({rule.mode}→{rule.to})"
@@ -97,10 +105,21 @@ def apply_propagate(
             continue
 
         if rule.mode == "split":
-            raise GenerateError(
-                f"split 传播（父子金额拆分）计划在 M4 支持，当前不可用",
-                rule_path,
-            )
+            if not rule.from_:
+                raise GenerateError(f"split 传播缺少 from（父字段名）", rule_path)
+            if rule.to not in split_pieces:
+                raise GenerateError(
+                    f"split 传播缺少拆分结果（调用方未提供 {rule.to} 的各份金额）",
+                    rule_path,
+                )
+            pieces = split_pieces[rule.to]
+            if part_index >= len(pieces):
+                raise GenerateError(
+                    f"split 取第 {part_index} 份越界（共 {len(pieces)} 份）",
+                    rule_path,
+                )
+            child_values[rule.to] = pieces[part_index]
+            continue
 
         if rule.mode == "aggregate":
             continue  # Phase 2 回填，M3

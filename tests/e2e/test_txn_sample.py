@@ -155,5 +155,5 @@ def test_memory_mode_has_no_side_effect(result, tmp_path):
 def test_plan_matches_generation(result):
     plan = service.plan(service.load(SAMPLE))
     planned = {item.table: item.planned_rows for item in plan.tables}
-    assert planned == {"t_txn": 9, "t_txn_detail": 9, "t_txn_log": 27}
-    assert plan.order == ["t_txn", "t_txn_detail", "t_txn_log"]
+    assert planned == {"t_txn": 9, "t_txn_detail": 9, "t_txn_item": 18, "t_txn_log": 27}
+    assert plan.order == ["t_txn", "t_txn_detail", "t_txn_item", "t_txn_log"]

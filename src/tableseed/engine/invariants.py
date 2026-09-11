@@ -18,28 +18,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
-
 from ..errors import ExprError, GenerateError
 from ..expr import build_functions
 from ..expr.aggregate_expr import AggregateExpression
-from ..models import InvariantSpec, SeedConfig, TableData
+from ..models import InvariantFailure, InvariantSpec, SeedConfig, TableData
 from ..rng import SeededRandom
 
-__all__ = ["InvariantFailure", "verify_invariants"]
-
-
-class InvariantFailure(BaseModel):
-    """一条不变量的违例明细。"""
-
-    index: int           # 第几条不变量（0 起）
-    expr: str            # 断言原文
-    table: str           # 在哪张表上违例
-    seq: int             # 违例行序号
-    row: dict[str, Any]  # 违例行的完整值
-
-    def describe(self) -> str:
-        return f"invariants[{self.index}] {self.expr!r} 违例 @ {self.table}#{self.seq}"
+__all__ = ["verify_invariants"]
 
 
 def verify_invariants(

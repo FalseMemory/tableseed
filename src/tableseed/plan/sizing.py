@@ -34,29 +34,13 @@ def plan_tables(config: SeedConfig) -> PlanResult:
         relation = parent_of.get(name)
         note: str | None = None
 
-        # ---- 策略影响的预估基数（根表 / 1:N 的每父行展开数）----
-        if strategy == "sample":
-            base = min(config.limits.sample_size or 10, combos) if combos else 0
-            if combos > base:
-                note = f"sample 策略：{combos} 个组合随机抽 {base} 行"
-        elif strategy == "pairwise" and combos:
-            estimate = sum(
-                1 for _ in pairwise_skeletons(finite, _plan_rng(config), combos)
-            )
-            base = min(estimate, combos)
-            if base < combos:
-                note = (
-                    f"pairwise 策略：{combos} 个组合预计精简为约 {base} 行"
-                    "（两两配对全覆盖，实际行数以生成为准）"
-                )
-        else:
-            base = combos
-
         if relation is None:
-            # ---- 根表：组合数就是行数 ----
+            # ---- 根表：每父行基数 = 策略展开的行数 ----
+            base, note = _per_parent_base(config, finite, combos, note)
             planned = _cap(config, table, base, name, warnings)
         elif relation.cardinality in {"1:1", "1:0..1"}:
             # ---- 1:1：行数跟随父表，有限组只做分配 ----
+            base, _ = _per_parent_base(config, finite, combos, note)
             parent_rows = planned_rows.get(relation.parent, 0)
             planned = min(parent_rows, config.limits.max_rows)
             if combos > parent_rows:
@@ -68,11 +52,12 @@ def plan_tables(config: SeedConfig) -> PlanResult:
             elif combos and combos < parent_rows:
                 note = note or f"1:1 分配：{combos} 个组合在 {parent_rows} 行内轮转复用"
         else:
-            # ---- 1:N：父表每行展开一遍 ----
+            # ---- 1:N：行数 = 父行数 × 每父行基数 ----
             parent_rows = planned_rows.get(relation.parent, 0)
+            base, note = _per_parent_base(config, finite, combos, note, relation)
             planned = _cap(config, table, parent_rows * max(base, 1), name, warnings)
-            if combos:
-                note = note or f"1:N 展开：父表 {parent_rows} 行 × {combos} 组合"
+            if combos and not note:
+                note = f"1:N 展开：父表 {parent_rows} 行 × {combos} 组合"
 
         planned_rows[name] = planned
         plans.append(
@@ -95,6 +80,42 @@ def plan_tables(config: SeedConfig) -> PlanResult:
         warnings=warnings,
         within_limits=within,
     )
+
+
+def _per_parent_base(
+    config: SeedConfig,
+    finite: list,
+    combos: int,
+    note: str | None,
+    relation=None,
+) -> tuple[int, str | None]:
+    """每父行的展开基数：split > sample > pairwise > full（笛卡尔积）。"""
+    strategy = config.limits.strategy
+
+    # split 传播决定每父行份数（此时子表无有限组，combos = 0）
+    if relation is not None:
+        split_rule = next((r for r in relation.propagate if r.mode == "split"), None)
+        if split_rule is not None:
+            per = split_rule.parts or (len(split_rule.ratio) if split_rule.ratio else 1)
+            return per, f"split 拆分：每条父行拆 {per} 份"
+
+    if strategy == "sample" and combos:
+        base = min(config.limits.sample_size or 10, combos)
+        if combos > base:
+            return base, f"sample 策略：{combos} 个组合随机抽 {base} 行"
+        return combos, note
+
+    if strategy == "pairwise" and combos:
+        estimate = sum(1 for _ in pairwise_skeletons(finite, _plan_rng(config), combos))
+        base = min(estimate, combos)
+        if base < combos:
+            return base, (
+                f"pairwise 策略：{combos} 个组合预计精简为约 {base} 行"
+                "（两两配对全覆盖，实际行数以生成为准）"
+            )
+        return combos, note
+
+    return combos, note
 
 
 def _plan_rng(config: SeedConfig):
