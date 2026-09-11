@@ -32,6 +32,7 @@ from ..models import (
 )
 from ..rng import SeededRandom
 from .allocator import ComboAllocator, drive_fields_of
+from .coverage import expand_by_strategy
 from .group_expander import attach_groups, combo_count, expand_skeleton, finite_groups
 from .propagator import apply_propagate, build_env, effective_rules
 
@@ -59,10 +60,17 @@ def generate_table(
     max_rows = _resolve_max_rows(config, table, limit)
     excludes = _compile_excludes(config, funcs)
 
+    strategy = config.limits.strategy
+    skeletons = (
+        expand_skeleton(finite)
+        if strategy == "full"
+        else expand_by_strategy(finite, strategy, config.limits.sample_size, rng, max_rows)
+    )
+
     rows: list[GeneratedRow] = []
     truncated = False
 
-    for skeleton in expand_skeleton(finite):
+    for skeleton in skeletons:
         seq = len(rows)
         values = _build_row(skeleton, attaches, seq, funcs, rng, parent_values=None)
 
@@ -72,7 +80,7 @@ def generate_table(
 
         rows.append(GeneratedRow(table=table.name, seq=seq, values=values))
         if len(rows) >= max_rows:
-            truncated = total_combos > max_rows
+            truncated = total_combos > max_rows or config.limits.strategy != "full"
             break
 
     return _finish(table, rows, truncated)
@@ -130,8 +138,14 @@ def generate_child(
             # 1:1 —— 分配一个组合，行数不放大
             skeletons = iter([allocator.assign(parent_row.values, len(rows))])
         else:
-            # 1:N —— 笛卡尔积放大，覆盖换行数
-            skeletons = expand_skeleton(finite) if finite else iter([{}])
+            # 1:N —— 按策略展开（默认笛卡尔积放大，覆盖换行数）
+            strategy = config.limits.strategy
+            if strategy == "full":
+                skeletons = expand_skeleton(finite) if finite else iter([{}])
+            else:
+                skeletons = expand_by_strategy(
+                    finite, strategy, config.limits.sample_size, rng, max_rows
+                ) or iter([{}])
 
         for skeleton in skeletons:
             seq = len(rows)

@@ -39,6 +39,24 @@ def _fail(message: str) -> None:
     raise typer.Exit(code=1)
 
 
+def _coverage_text(config, result, name: str) -> str:
+    """实际组合覆盖 / 理论组合数 —— 覆盖度一眼可见（NFR-5）。"""
+    from .engine.group_expander import combo_count, finite_groups
+
+    finite = finite_groups(config.table(name))
+    if not finite or name not in result.tables:
+        return "-"
+
+    total = combo_count(finite)
+    fields = [f for g in finite for f in g.fields]
+    seen = {
+        tuple(row.values.get(f) for f in fields)
+        for row in result.tables[name].rows
+    }
+    ratio = f"{len(seen) / total:.0%}" if total else "-"
+    return f"{len(seen)}/{total}（{ratio}）"
+
+
 def _load(config: Path):
     try:
         return service.load(config)
@@ -130,8 +148,11 @@ def gen(
     table.add_column("表", style="cyan", no_wrap=True)
     table.add_column("行数", justify="right", style="green")
     table.add_column("字段数", justify="right")
+    table.add_column("组合覆盖", justify="right")
     for name, data in result.tables.items():
-        table.add_row(name, str(len(data)), str(len(data.columns)))
+        table.add_row(
+            name, str(len(data)), str(len(data.columns)), _coverage_text(seed_config, result, name)
+        )
     console.print(table)
 
     console.print(
