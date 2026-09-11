@@ -1,0 +1,148 @@
+"""快速生成（DDL/INSERT → YAML）与结构化编辑往返测试。"""
+
+from __future__ import annotations
+
+import allure
+import pytest
+
+from tableseed import service
+from tableseed.config.ddl_import import generate_yaml, parse_create_table, parse_inserts
+from tableseed.errors import ConfigError
+from tableseed.web.structured import from_edit_view, to_edit_view
+
+DDL = """
+CREATE TABLE t_demo (
+  id bigint NOT NULL AUTO_INCREMENT,
+  acct_no varchar(32) NOT NULL,
+  status char(2) NOT NULL,
+  balance decimal(18,2),
+  open_date date,
+  remark varchar(200),
+  PRIMARY KEY (id)
+);
+"""
+
+INSERTS = """
+INSERT INTO t_demo (acct_no, status, balance, open_date) VALUES
+('A1', '01', 10.5, '2026-01-15'),
+('A2', '02', 20.5, '2026-03-20');
+"""
+
+
+def full_config() -> str:
+    return generate_yaml(DDL, INSERTS)
+
+
+# ---------------------------------------------------------------- DDL 解析
+
+
+@allure.epic("tableseed")
+@allure.feature("快速生成")
+@allure.story("DDL 列解析")
+def test_parse_create_table():
+    table, columns = parse_create_table(DDL)
+    assert table == "t_demo"
+    assert [c.name for c in columns] == [
+        "id", "acct_no", "status", "balance", "open_date", "remark",
+    ]
+    assert columns[0].primary_key is True       # AUTO_INCREMENT
+    assert columns[1].primary_key is False      # 只在 PRIMARY KEY (...) 里的才是
+    assert columns[1].nullable is False
+
+
+@allure.story("INSERT 样例解析：字符串逗号不切错")
+def test_parse_inserts_with_comma_in_string():
+    samples = parse_inserts(
+        "INSERT INTO t (a, b) VALUES ('x, y', 1), ('it''s', 2);"
+    )
+    assert samples["a"] == ["x, y", "it's"]
+    assert samples["b"] == [1, 2]
+
+
+@allure.story("坏 DDL 不抛异常，返回空")
+def test_bad_ddl_is_tolerated():
+    table, columns = parse_create_table("这是随手的文本")
+    assert columns == []
+
+
+# ---------------------------------------------------------------- YAML 生成
+
+
+@allure.feature("快速生成")
+@allure.story("启发式分组：类型优先于取值枚举")
+def test_generated_yaml_heuristics():
+    text = full_config()
+    assert "type: sequence" in text            # 整型主键
+    assert "type: enum" in text                # 低基数字符串
+    assert "generator: decimal" in text        # 金额不因样例少而变 enum
+    assert "generator: date" in text
+    assert "generator: string" in text         # 无样例的 varchar
+    assert "{{seq" not in text                 # 不残留转义大括号
+
+
+@allure.story("生成的 YAML 可通过校验并生成数据")
+def test_generated_yaml_is_loadable():
+    config = service.load_text(full_config())
+    assert service.check(config) == []
+    result = service.generate(config)
+    assert len(result.tables["t_demo"]) == 4  # status 2 值 × acct_no 2 值
+
+
+# ---------------------------------------------------------------- 结构化编辑
+
+
+@allure.feature("配置编辑器")
+@allure.story("编辑视图往返一致（含关系/聚合/split 的复杂配置）")
+def test_edit_view_roundtrip():
+    from pathlib import Path
+
+    sample = Path(__file__).resolve().parents[2] / "samples" / "txn.yaml"
+    config = service.load(sample)
+    view = to_edit_view(config)
+    regenerated = service.load_text(from_edit_view(view))
+
+    assert service.check(regenerated) == []
+    first = service.generate(config)
+    second = service.generate(regenerated)
+    for name in first.tables:
+        assert first.tables[name].to_records() == second.tables[name].to_records()
+
+
+@allure.story("enum 组不携带 sequence 的默认值")
+def test_edit_view_has_no_cross_type_defaults():
+    config = service.load_text(full_config())
+    view = to_edit_view(config)
+    status_group = next(g for g in view["tables"][0]["groups"] if g["name"] == "g_status")
+    assert "start" not in status_group
+    assert "step" not in status_group
+    assert status_group["values"] == [["01"], ["02"]]
+
+
+@allure.story("编辑后的非法配置当场报错")
+def test_invalid_edit_is_rejected():
+    view = to_edit_view(service.load_text(full_config()))
+    view["tables"][0]["groups"][0]["fields"] = []          # 组没有字段
+    with pytest.raises(ConfigError, match="不合法"):
+        from_edit_view(view)
+
+
+@allure.feature("配置编辑器")
+@allure.story("WebUI 结构化接口")
+def test_structured_endpoints():
+    from fastapi.testclient import TestClient
+
+    from tableseed.web.app import create_app
+
+    client = TestClient(create_app())
+    client.put("/api/config", json={"text": full_config()})
+
+    view = client.get("/api/config/structured").json()
+    assert view["tables"][0]["name"] == "t_demo"
+
+    saved = client.put("/api/config/structured", json={"edit": view})
+    assert saved.json()["ok"] is True
+
+    imported = client.post(
+        "/api/import/yaml", json={"ddl": DDL, "inserts": INSERTS}
+    ).json()
+    assert imported["problems"] == []

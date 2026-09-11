@@ -95,6 +95,11 @@
     color: var(--text); padding: 7px 12px; font-size: 13px; font-family: var(--mono); min-width: 0;
   }
   input.grow { flex: 1; }
+  select {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 7px;
+    color: var(--text); padding: 7px 10px; font-size: 13px; font-family: inherit;
+  }
+  .row [data-gi] { min-width: 0; }
   textarea.sqlbox {
     width: 100%; height: 110px; background: var(--panel); border: 1px solid var(--line);
     border-radius: 8px; padding: 10px 12px; color: var(--text); font-family: var(--mono); font-size: 13px; resize: vertical;
@@ -153,6 +158,8 @@
       <button data-tab="plan" class="active">预演</button>
       <button data-tab="graph">关系图</button>
       <button data-tab="result">结果预览</button>
+      <button data-tab="editor">配置编辑器</button>
+      <button data-tab="import">快速生成</button>
       <button data-tab="sql">SQL 查询台</button>
     </nav>
 
@@ -164,6 +171,31 @@
       <div class="empty">点击「预演」或「校验」后查看表间关系图。</div>
     </div>
 
+    <div class="tab-body" id="tab-editor" hidden>
+      <div class="row">
+        <span class="hint">像表格一样改配置：字段、分组、类型、取值。改完保存会自动校验。</span>
+        <span class="spacer"></span>
+        <button class="primary" id="btn-editor-save">保存并校验</button>
+      </div>
+      <div id="editor-body"><div class="empty">载入中…</div></div>
+      <div id="editor-out"></div>
+    </div>
+
+    <div class="tab-body" id="tab-import" hidden>
+      <div class="hint" style="margin-bottom:10px">
+        贴入建表语句（DDL）与几条真实 INSERT —— 自动生成 YAML 配置草稿，
+        字段分组、取值范围都有了合理默认，生成后可在左栏或「配置编辑器」里精修。
+      </div>
+      <div class="row">
+        <input type="text" id="imp-table" placeholder="表名（留空则从 DDL 解析）" style="width:220px">
+        <span class="spacer"></span>
+        <button class="primary" id="btn-import">生成 YAML 草稿</button>
+      </div>
+      <textarea class="sqlbox" id="imp-ddl" spellcheck="false" placeholder="CREATE TABLE ..."></textarea>
+      <textarea class="sqlbox" id="imp-inserts" spellcheck="false" placeholder="INSERT INTO ... VALUES (...), (...);" style="margin-top:8px"></textarea>
+      <div id="imp-out" style="margin-top:12px"></div>
+    </div>
+
     <div class="tab-body" id="tab-result" hidden>
       <div class="empty">点击「生成数据」查看结果。默认只生成不落盘。</div>
     </div>
@@ -171,6 +203,8 @@
     <div class="tab-body" id="tab-sql" hidden>
       <div class="row">
         <input type="text" class="grow" id="sql-dsn" placeholder="数据库连接串（留空则用配置中的 database.url）">
+        <input type="text" id="sql-table" placeholder="表名（用于快速获取建表语句）" style="width:220px">
+        <button id="btn-sql-ddl">获取建表语句</button>
       </div>
       <textarea class="sqlbox" id="sql-text" spellcheck="false">SELECT 1</textarea>
       <div class="row" style="margin-top:10px">
@@ -404,6 +438,173 @@ function legendHtml(g) {
   return '<div style="height:16px"></div>' + tableHtml(head, rows.map((r) => head.map((h) => r[h])));
 }
 
+// ---------------------------------------------------------------- 快速生成
+
+async function runImport() {
+  const out = $("imp-out");
+  out.innerHTML = '<div class="empty">解析中…</div>';
+  try {
+    const res = await api("/api/import/yaml", {
+      method: "POST",
+      body: JSON.stringify({
+        ddl: $("imp-ddl").value,
+        inserts: $("imp-inserts").value,
+        table: $("imp-table").value || null,
+      }),
+    });
+    $("yaml").value = res.yaml;   // 直接送进左栏编辑器
+    await validate(true);
+
+    let html = "";
+    if (res.problems && res.problems.length) {
+      html += msg("warn", "草稿已生成，但有提示", res.problems);
+    } else {
+      html += msg("ok", "草稿已生成并通过校验，已载入左栏配置编辑器");
+    }
+    html += `<div class="row" style="margin-top:10px">
+      <button id="btn-imp-gen" class="primary">直接生成数据</button>
+      <button id="btn-imp-plan">预演规模</button>
+      <span class="hint">或在「配置编辑器」里继续精修</span>
+    </div>`;
+    out.innerHTML = html;
+    $("btn-imp-gen").addEventListener("click", runGenerate);
+    $("btn-imp-plan").addEventListener("click", runPlan);
+    setStatus("YAML 草稿已生成");
+  } catch (e) {
+    out.innerHTML = msg("err", e.message);
+  }
+}
+
+// ---------------------------------------------------------------- 配置编辑器
+
+const GROUP_TYPES = ["enum", "boundary", "dict", "sequence", "random", "const", "derive", "ref", "aggregate"];
+const GROUP_KEYS = {
+  enum:     ["values"],
+  boundary: ["values"],
+  dict:     ["from"],
+  sequence: ["start", "format"],
+  random:   ["generator", "range", "scale"],
+  const:    ["value"],
+  derive:   ["expr"],
+  ref:      ["from"],
+  aggregate:["from", "expr"],
+};
+
+const editState = { view: null, tableIndex: 0 };
+
+async function loadEditor() {
+  const body = $("editor-body");
+  try {
+    editState.view = await api("/api/config/structured");
+    editState.tableIndex = 0;
+    renderEditor();
+  } catch (e) {
+    body.innerHTML = msg("err", e.message);
+  }
+}
+
+function renderEditor() {
+  const body = $("editor-body");
+  const v = editState.view;
+  if (!v || !v.tables.length) { body.innerHTML = '<div class="empty">配置里还没有表。</div>'; return; }
+
+  const names = v.tables.map((t) => t.name);
+  const bar = `
+    <div class="row">
+      <label class="hint">表</label>
+      <select id="ed-table" class="ed-select">${names.map((n, i) =>
+        `<option value="${i}" ${i === editState.tableIndex ? "selected" : ""}>${escapeHtml(n)}</option>`).join("")}
+      </select>
+      <span class="spacer"></span>
+      <button id="ed-add-group">+ 加一组</button>
+    </div>`;
+
+  const table = v.tables[editState.tableIndex];
+  const rows = table.groups.map((g, gi) => editorRowHtml(g, gi)).join("");
+  body.innerHTML = bar
+    + `<div class="row" style="font-size:12px;color:var(--muted);margin-bottom:4px">
+         <span style="width:150px">组名</span><span style="width:110px">类型</span>
+         <span style="width:200px">字段（逗号分隔）</span><span>取值 / 参数</span>
+       </div>`
+    + rows
+    + '<div class="hint" style="margin-top:10px">取值/参数按类型填：enum 的 values 用 JSON 数组（如 [["01","正常"],["02","冻结"]]）；random 的 range 如 [0,1000]；const 的 value 如 ["0001"]。关系与不变量请回左栏 YAML 编辑。</div>';
+  bindEditor();
+}
+
+function editorRowHtml(g, gi) {
+  const keys = GROUP_KEYS[g.type] || [];
+  const params = keys.map((k) => {
+    const val = g[k] === undefined ? "" : (typeof g[k] === "string" ? g[k] : JSON.stringify(g[k]));
+    return `<input type="text" class="ed-param" data-gi="${gi}" data-key="${k}"
+      value="${escapeHtml(val)}" placeholder="${k}" style="min-width:150px">`;
+  }).join(" ");
+  return `<div class="row" style="margin-bottom:6px;flex-wrap:nowrap">
+    <input type="text" class="ed-name" data-gi="${gi}" value="${escapeHtml(g.name)}" style="width:150px">
+    <select class="ed-type" data-gi="${gi}">${GROUP_TYPES.map((t) =>
+      `<option ${t === g.type ? "selected" : ""}>${t}</option>`).join("")}</select>
+    <input type="text" class="ed-fields" data-gi="${gi}" value="${escapeHtml(g.fields.join(", "))}" style="width:200px">
+    <span style="display:flex;gap:6px;flex:1;min-width:0;overflow:auto">${params}</span>
+    <button class="ed-del" data-gi="${gi}" title="删除该组">✕</button>
+  </div>`;
+}
+
+function bindEditor() {
+  const v = editState.view, table = v.tables[editState.tableIndex];
+  $("ed-table").addEventListener("change", (e) => { editState.tableIndex = +e.target.value; renderEditor(); });
+  $("ed-add-group").addEventListener("click", () => {
+    table.groups.push({ type: "enum", name: "g_new", fields: [], values: [] });
+    renderEditor();
+  });
+  table.groups.forEach((g, gi) => {
+    document.querySelector(`.ed-name[data-gi="${gi}"]`).addEventListener("change", (e) => { g.name = e.target.value.trim(); });
+    document.querySelector(`.ed-type[data-gi="${gi}"]`).addEventListener("change", (e) => {
+      g.type = e.target.value;
+      GROUP_KEYS[g.type].forEach((k) => { if (g[k] === undefined) g[k] = k === "values" ? [] : ""; });
+      renderEditor();
+    });
+    document.querySelector(`.ed-fields[data-gi="${gi}"]`).addEventListener("change", (e) => {
+      g.fields = e.target.value.split(",").map((s) => s.trim()).filter(Boolean);
+    });
+    document.querySelectorAll(`.ed-param[data-gi="${gi}"]`).forEach((input) => {
+      input.addEventListener("change", () => {
+        const key = input.dataset.key;
+        g[key] = parseMaybeJson(input.value);
+      });
+    });
+    document.querySelector(`.ed-del[data-gi="${gi}"]`).addEventListener("click", () => {
+      table.groups.splice(gi, 1);
+      renderEditor();
+    });
+  });
+}
+
+function parseMaybeJson(text) {
+  const t = text.trim();
+  if (!t) return "";
+  if (t.startsWith("[") || t.startsWith("{") || /^-?\d+(\.\d+)?$/.test(t)) {
+    try { return JSON.parse(t); } catch (e) { return text; }
+  }
+  return text;
+}
+
+async function saveEditor() {
+  const out = $("editor-out");
+  try {
+    const res = await api("/api/config/structured", {
+      method: "PUT",
+      body: JSON.stringify({ edit: editState.view }),
+    });
+    $("yaml").value = res.text;
+    out.innerHTML = res.ok
+      ? msg("ok", `已保存${res.saved ? "到 " + res.path : "（仅内存）"}，校验通过`)
+      : msg("err", "已保存，但配置存在问题", res.problems);
+    await validate(true);
+    setStatus(res.ok ? "配置编辑器已保存" : "保存了，但有校验问题");
+  } catch (e) {
+    out.innerHTML = msg("err", e.message);
+  }
+}
+
 // ---------------------------------------------------------------- 生成（SSE）
 
 async function runGenerate() {
@@ -536,6 +737,38 @@ async function runVerify() {
 
 // ---------------------------------------------------------------- SQL 查询台
 
+function rowsToInserts(table, columns, rows, limit) {
+  const q = (v) => v === null || v === undefined ? "NULL"
+    : typeof v === "number" ? String(v) : "'" + String(v).replace(/'/g, "''") + "'";
+  return rows.slice(0, limit).map((row) => {
+    const vals = columns.map((c) => q(row[c])).join(", ");
+    return `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${vals});`;
+  }).join("\n");
+}
+
+async function fetchDDL() {
+  const out = $("sql-out");
+  const table = $("sql-table").value.trim();
+  if (!table) { out.innerHTML = msg("warn", "请先填写表名"); return; }
+  out.innerHTML = '<div class="empty">反射表结构中…</div>';
+  try {
+    const res = await api("/api/sql/ddl", {
+      method: "POST",
+      body: JSON.stringify({ table, dsn: $("sql-dsn").value || null }),
+    });
+    out.innerHTML = `<div class="msg ok">${escapeHtml(table)} 的建表语句</div><textarea class="sqlbox" readonly style="height:220px">${escapeHtml(res.ddl)}</textarea>
+      <div class="row" style="margin-top:8px"><button id="btn-ddl-to-imp">送到「快速生成」</button></div>`;
+    $("btn-ddl-to-imp").addEventListener("click", () => {
+      $("imp-ddl").value = res.ddl;
+      $("imp-table").value = table;
+      switchTab("import");
+    });
+    setStatus("建表语句已获取");
+  } catch (e) { out.innerHTML = msg("err", e.message); }
+}
+
+let lastQuery = null;  // 最近一次查询 {columns, rows}
+
 async function runSql() {
   const out = $("sql-out");
   out.innerHTML = '<div class="empty">执行中…</div>';
@@ -544,19 +777,40 @@ async function runSql() {
       method: "POST",
       body: JSON.stringify({ sql: $("sql-text").value, dsn: $("sql-dsn").value || null }),
     });
-    const info = `<div class="msg ok">返回 ${res.row_count} 行，耗时 ${res.elapsed_ms} ms${res.truncated ? "（已截断）" : ""}</div>`;
+    lastQuery = { columns: res.columns, rows: res.rows };
+    const insertBtn = `<button id="btn-sql-insert">由查询结果生成 INSERT（前 10 行）</button>`;
+    const info = `<div class="msg ok">返回 ${res.row_count} 行，耗时 ${res.elapsed_ms} ms${res.truncated ? "（已截断）" : ""} ${insertBtn}</div>`;
     out.innerHTML = info + tableHtml(res.columns, res.rows);
+    $("btn-sql-insert").addEventListener("click", () => {
+      if (!lastQuery || !lastQuery.rows.length) return;
+      const table = guessTableName($("sql-text").value);
+      const text = rowsToInserts(table, lastQuery.columns, lastQuery.rows, 10);
+      out.innerHTML = `<div class="msg ok">已生成 ${Math.min(10, lastQuery.rows.length)} 条 INSERT（表名按 ${escapeHtml(table)} 推断，可自行修改）</div>
+        <textarea class="sqlbox" readonly style="height:220px">${escapeHtml(text)}</textarea>
+        <div class="row" style="margin-top:8px"><button id="btn-ins-to-imp">送到「快速生成」</button></div>`;
+      $("btn-ins-to-imp").addEventListener("click", () => {
+        $("imp-inserts").value = text;
+        $("imp-table").value = table;
+        switchTab("import");
+      });
+    });
   } catch (e) {
     out.innerHTML = msg("err", e.message);
   }
+}
+
+function guessTableName(sql) {
+  const m = sql.match(/FROM\s+[`"\[]?(\w+)[`"\]]?/i);
+  return m ? m[1] : "t_table";
 }
 
 // ---------------------------------------------------------------- 交互
 
 function switchTab(name) {
   document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
-  ["plan", "graph", "result", "sql"].forEach((t) => { $("tab-" + t).hidden = t !== name; });
+  ["plan", "graph", "result", "editor", "import", "sql"].forEach((t) => { $("tab-" + t).hidden = t !== name; });
   if (name === "graph") runGraph();  // 每次切入都重取，配置可能刚改过
+  if (name === "editor") loadEditor();
 }
 
 document.querySelectorAll(".tabs button").forEach((b) => {
@@ -568,6 +822,9 @@ $("btn-gen").addEventListener("click", runGenerate);
 $("btn-save").addEventListener("click", saveConfig);
 $("btn-sql").addEventListener("click", runSql);
 $("btn-verify").addEventListener("click", runVerify);
+$("btn-import").addEventListener("click", runImport);
+$("btn-sql-ddl").addEventListener("click", fetchDDL);
+$("btn-editor-save").addEventListener("click", saveEditor);
 
 boot();
 </script>

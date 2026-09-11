@@ -223,6 +223,63 @@ def create_app(config_path: str | None = None) -> FastAPI:
             "failures": [f.model_dump() for f in failures],
         }
 
+    # ---------------------------------------------------------- 快速生成
+
+    @app.post("/api/import/yaml")
+    def import_yaml(payload: dict[str, Any]) -> dict[str, Any]:
+        """从建表语句 + INSERT 样例生成 YAML 配置草稿。"""
+        from ..config.ddl_import import generate_yaml  # noqa: PLC0415
+
+        text = generate_yaml(
+            payload.get("ddl") or "",
+            payload.get("inserts") or "",
+            table=payload.get("table"),
+            seed=payload.get("seed") or 20260910,
+        )
+        problems: list[str] = []
+        try:
+            config = state.parse(text)
+            problems = service.check(config)
+        except TableSeedError as exc:
+            problems = [str(exc)]
+        return {"yaml": text, "problems": problems}
+
+    # ---------------------------------------------------------- 配置编辑器
+
+    @app.get("/api/config/structured")
+    def get_structured() -> dict[str, Any]:
+        """当前配置的编辑视图（供表格化编辑）。"""
+        from .structured import to_edit_view  # noqa: PLC0415
+
+        try:
+            config = state.parse(state.text)
+        except TableSeedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return to_edit_view(config)
+
+    @app.put("/api/config/structured")
+    def put_structured(payload: dict[str, Any]) -> dict[str, Any]:
+        """保存编辑视图 —— 校验 + 生成 YAML 写回状态（绑定了文件则落盘）。"""
+        from .structured import from_edit_view  # noqa: PLC0415
+
+        try:
+            text = from_edit_view(payload.get("edit") or {})
+            config = state.parse(text)
+        except TableSeedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        problems = service.check(config)
+        state.text = text
+        if state.config_path:
+            Path(state.config_path).write_text(text, encoding="utf-8")
+        return {
+            "text": text,
+            "saved": bool(state.config_path),
+            "path": state.config_path,
+            "problems": problems,
+            "ok": not problems,
+        }
+
     # ---------------------------------------------------------------- 生成
 
     @app.post("/api/generate")
@@ -317,6 +374,17 @@ def create_app(config_path: str | None = None) -> FastAPI:
         return state.snapshot()
 
     # ---------------------------------------------------------------- SQL 查询台
+
+    @app.post("/api/sql/ddl")
+    def get_ddl(payload: dict[str, Any]) -> dict[str, Any]:
+        """按表名反射建表语句（SQLAlchemy Inspector + CreateTable）。"""
+        url = payload.get("dsn") or (config.database.url if (config := _current_config()) and config.database else None)
+        table = payload.get("table")
+        if not url:
+            raise HTTPException(status_code=400, detail="未配置数据库连接，无法获取建表语句")
+        if not table:
+            raise HTTPException(status_code=400, detail="缺少表名")
+        return {"ddl": _reflect_ddl(url, table)}
 
     @app.post("/api/sql/execute")
     def execute_sql(payload: SqlPayload) -> dict[str, Any]:
@@ -456,6 +524,47 @@ def _graph_edges(config: SeedConfig) -> list[dict[str, Any]]:
                 }
             )
     return edges
+
+
+def _current_config() -> SeedConfig | None:
+    """解析当前文本配置；解析失败返回 None（各接口自行降级）。"""
+    try:
+        return state.parse(state.text)
+    except TableSeedError:
+        return None
+
+
+def _reflect_ddl(url: str, table: str) -> str:
+    """反射表结构并生成 CREATE TABLE 语句。
+
+    生成的是 SQLAlchemy 方言 DDL —— 类型写法可能与原库略有出入
+    （如 VARCHAR2 → VARCHAR），作为造数配置的输入足够了。
+    """
+    try:
+        from sqlalchemy import MetaData, create_engine  # noqa: PLC0415
+        from sqlalchemy.schema import CreateTable  # noqa: PLC0415
+        from sqlalchemy.dialects import registry as _dialect_registry  # noqa: PLC0415,F401
+    except ImportError as exc:  # pragma: no cover
+        raise TableSeedError("未安装 SQLAlchemy，无法反射建表语句") from exc
+
+    from ..errors import SinkError  # noqa: PLC0415
+
+    engine = create_engine(url, future=True)
+    try:
+        metadata = MetaData()
+        metadata.reflect(bind=engine, only=[table])
+        if table not in metadata.tables:
+            raise SinkError(f"数据库中不存在表 {table}")
+        ddl = str(
+            CreateTable(metadata.tables[table]).compile(engine)
+        ).strip() + ";"
+        return ddl
+    except TableSeedError:
+        raise
+    except Exception as exc:
+        raise SinkError(f"反射表 {table} 失败: {exc}") from exc
+    finally:
+        engine.dispose()
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:
