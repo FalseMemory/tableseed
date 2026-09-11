@@ -29,6 +29,7 @@ def check_config(config: SeedConfig) -> list[str]:
     for table in config.tables:
         problems.extend(
             _check_table(
+                config,
                 table,
                 funcs,
                 has_parent=table.name in {r.child for r in config.relations},
@@ -51,6 +52,7 @@ def _check_table_names(config: SeedConfig) -> list[str]:
 
 
 def _check_table(
+    config: SeedConfig,
     table: TableSpec,
     funcs: dict,
     has_parent: bool = False,
@@ -128,6 +130,9 @@ def _check_table(
 
         if group.type == "ref" and not group.from_:
             problems.append(f"{group_path}: ref 组必须提供 from（源表.源字段）")
+
+        if group.type == "aggregate":
+            problems.extend(_check_aggregate(config, table, group, group_path))
 
     if not finite_groups(table) and not has_parent:
         problems.append(
@@ -324,6 +329,46 @@ def _all_fields(table: TableSpec) -> set[str]:
     for group in table.groups:
         fields.update(group.fields)
     return fields
+
+
+def _check_aggregate(
+    config: SeedConfig, table: TableSpec, group, group_path: str
+) -> list[str]:
+    """aggregate 组必须能找到唯一的源表，且两表之间要有带 join 的关系。"""
+    problems: list[str] = []
+    children = [r for r in config.relations if r.parent == table.name]
+
+    if group.from_:
+        source = group.from_.split(".")[0]
+        matched = [r for r in children if r.child == source]
+        if not matched:
+            available = ", ".join(r.child for r in children) or "无"
+            problems.append(
+                f"{group_path}: 源表 {source} 不是 {table.name} 的子表"
+                f"（可用子表: {available}）"
+            )
+        elif not matched[0].join:
+            problems.append(
+                f"{group_path}: 聚合需要锚点，但关系 {table.name} → {source} 未声明 join"
+            )
+        return problems
+
+    if not children:
+        problems.append(
+            f"{group_path}: aggregate 组需要子表才能汇总，"
+            f"但 {table.name} 没有任何子表（请用 from 显式指定源表）"
+        )
+    elif len(children) > 1:
+        problems.append(
+            f"{group_path}: {table.name} 有多个子表（{', '.join(r.child for r in children)}），"
+            "aggregate 组必须用 from 显式指定源表"
+        )
+    elif not children[0].join:
+        problems.append(
+            f"{group_path}: 聚合需要锚点，"
+            f"但关系 {table.name} → {children[0].child} 未声明 join"
+        )
+    return problems
 
 
 def _known_fields(table: TableSpec) -> set[str]:

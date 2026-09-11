@@ -16,8 +16,10 @@ import time
 from typing import Any, Callable
 
 from ..errors import PlanError
+from ..expr import build_functions
 from ..models import GenerateResult, SeedConfig, TableData
 from ..rng import SeededRandom
+from .aggregator import backfill_aggregates
 from .table_gen import generate_child, generate_table
 from .topology import back_edges, topo_order
 
@@ -41,6 +43,7 @@ def generate_all(
     _reject_multi_parent(config)
 
     tables: dict[str, TableData] = {}
+    result_warnings: list[str] = []
     for name in order:
         table = config.table(name)
         # 每张表用独立子随机源 —— 某表行数变化不会污染其他表的随机序列
@@ -73,11 +76,20 @@ def generate_all(
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     result = GenerateResult(tables=tables, elapsed_ms=elapsed_ms, seed=config.seed)
 
-    if back_edges(config) and progress:
-        # M3 会在此执行 Phase 2 回填；现阶段仅提示，不改变行为
-        pending = ", ".join(f"{c}→{p}" for c, p in back_edges(config))
-        progress("warning", {"message": f"检测到 aggregate 反向边 {pending}，将在 M3 回填"})
+    # ---- Phase 2：沿反向边把子表汇总回填到父表的 aggregate 组 ----
+    if back_edges(config):
+        warnings = backfill_aggregates(config, tables, build_functions(base_rng))
+        for message in warnings:
+            if progress:
+                progress("warning", {"message": message})
+            result_warnings.append(message)
+        if progress:
+            progress("phase2_done", {"tables": [p for _, p in back_edges(config)]})
 
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    result = GenerateResult(
+        tables=tables, elapsed_ms=elapsed_ms, seed=config.seed, warnings=result_warnings
+    )
     return result
 
 

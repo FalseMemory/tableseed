@@ -266,6 +266,9 @@ class GenerateResult(_Model):
     elapsed_ms: int
     seed: int
 
+    #: 生成过程中的非致命提示（如「有 N 行父数据在子表中没有匹配行」）
+    warnings: list[str] = Field(default_factory=list)
+
 
 # ---------------------------------------------------------------- 预演结果
 

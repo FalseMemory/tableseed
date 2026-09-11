@@ -439,7 +439,10 @@ async function runGenerate() {
         const pct = data.total ? Math.round((data.done / data.total) * 100) : 0;
         const bar = $("prog");
         if (bar) bar.style.width = pct + "%";
-        setStatus(`生成中 ${data.done}/${data.total}` + (data.table ? ` · ${data.table}` : ""));
+        const rows = data.rows === undefined ? "" : ` · ${data.rows} 行`;
+        setStatus(`生成中 ${data.done}/${data.total}` + (data.table ? ` · ${data.table}${rows}` : ""));
+      } else if (event === "phase2") {
+        setStatus(`Phase 2 回填汇总：${data.tables.join("、")}`);
       } else if (event === "done") {
         state.result = data;
         renderResult(data);
@@ -467,6 +470,8 @@ function renderResult(data) {
     </div>`;
 
   let html = stats;
+  const warns = data.warnings || [];
+  if (warns.length) html += msg("warn", `${warns.length} 条提示`, warns);
   for (const name of names) {
     const t = data.tables[name];
     html += `<div class="pane-head" style="padding:10px 0;border:0">

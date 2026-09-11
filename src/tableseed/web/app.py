@@ -108,6 +108,7 @@ class AppState:
         return {
             "seed": result.seed,
             "elapsed_ms": result.elapsed_ms,
+            "warnings": list(getattr(result, "warnings", []) or []),
             "tables": {
                 name: {
                     "columns": data.columns,
@@ -268,6 +269,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
                             "rows": item["data"]["rows"],
                         },
                     )
+                elif item["event"] == "phase2_done":
+                    yield _sse("phase2", {"tables": item["data"]["tables"]})
                 else:
                     yield _sse("warning", {"message": item["data"]["message"]})
             events.clear()
@@ -401,6 +404,32 @@ def _graph_edges(config: SeedConfig) -> list[dict[str, Any]]:
                 "drive_by": list(relation.drive_by),
             }
         )
+
+    # aggregate 组构成「子 → 父」的反向边 —— 单独画成虚线，
+    # 让用户一眼看见哪些字段是 Phase 2 回填出来的
+    for table in config.tables:
+        children = [r.child for r in config.relations if r.parent == table.name]
+        for group in table.groups:
+            if group.type != "aggregate":
+                continue
+            source = group.from_.split(".")[0] if group.from_ else (
+                children[0] if len(children) == 1 else ""
+            )
+            if not source:
+                continue
+            edges.append(
+                {
+                    "parent": source,
+                    "child": table.name,
+                    "cardinality": "aggregate",
+                    "existence": "required",
+                    "join": [],
+                    "propagate": [{"mode": "aggregate", "to": ",".join(group.fields),
+                                   "from": None, "expr": group.expr}],
+                    "modes": ["aggregate"],
+                    "drive_by": [],
+                }
+            )
     return edges
 
 

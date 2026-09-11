@@ -105,6 +105,37 @@ def test_one_to_many_covers_every_parent(result):
     assert all(v == {"10", "20", "30"} for v in steps.values())
 
 
+@allure.feature("两阶段生成")
+@allure.story("aggregate 回填：明细金额合计来自子表")
+def test_aggregate_sum_backfills_from_child(result):
+    """t_txn.detail_amount_sum 应等于其明细行的 net_amount 之和。"""
+    detail_sum: dict[str, float] = {}
+    for row in result.tables["t_txn_detail"].rows:
+        key = row.values["txn_no"]
+        detail_sum[key] = detail_sum.get(key, 0) + row.values["net_amount"]
+
+    for row in result.tables["t_txn"].rows:
+        assert row.values["detail_amount_sum"] == pytest.approx(
+            detail_sum[row.values["txn_no"]], abs=0.02
+        )
+
+
+@allure.story("aggregate 回填：日志条数来自 1:N 子表")
+def test_aggregate_count_backfills_from_one_to_many(result):
+    counts: dict[str, int] = {}
+    for row in result.tables["t_txn_log"].rows:
+        key = row.values["txn_no"]
+        counts[key] = counts.get(key, 0) + 1
+
+    for row in result.tables["t_txn"].rows:
+        assert row.values["log_count"] == counts[row.values["txn_no"]] == 3
+
+
+@allure.story("回填不产生警告（每条父行都有匹配子行）")
+def test_backfill_has_no_warnings(result):
+    assert result.warnings == []
+
+
 @allure.story("同 seed 结果可复现")
 def test_generation_is_reproducible():
     first = service.generate(service.load(SAMPLE))

@@ -32,6 +32,9 @@ tables:
       - {name: amount, type: decimal, scale: 2}
       - {name: fee, type: decimal, scale: 2}
       - {name: tenant_id, type: string}
+      # 以下两个字段由 Phase 2 反向回填（子表汇总得出）
+      - {name: detail_amount_sum, type: decimal, scale: 2}
+      - {name: log_count, type: int}
 
     groups:
       # ---- 有限取值组：3 × 3 = 9 组合 ----
@@ -83,6 +86,21 @@ tables:
         name: g_fee
         fields: [fee]
         expr: "round(amount * 0.001, 2)"
+
+      # ---- 跨表汇总组：Phase 2 反向回填 ----
+      # 明细金额合计 —— 来自子表 t_txn_detail（1:1，每条交易一条明细）
+      - type: aggregate
+        name: g_detail_sum
+        fields: [detail_amount_sum]
+        from: t_txn_detail
+        expr: "sum(net_amount)"
+
+      # 日志条数 —— 来自子表 t_txn_log（1:N，每条交易 3 条日志）
+      - type: aggregate
+        name: g_log_count
+        fields: [log_count]
+        from: t_txn_log
+        expr: "count()"
 
   # ============================================== 子表：交易详情（1:1）
   - name: t_txn_detail
