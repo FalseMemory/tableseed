@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 import webbrowser
@@ -85,7 +86,28 @@ class GeneratePayload(BaseModel):
 class SqlPayload(BaseModel):
     sql: str
     dsn: str | None = None
+    #: 结构化连接信息（页面分行填写）；与 dsn 二选一，dsn 优先
+    database: dict[str, Any] | None = None
     confirm: str | None = None
+
+
+class DdlPayload(BaseModel):
+    table: str
+    dsn: str | None = None
+    database: dict[str, Any] | None = None
+
+
+class DatabasePayload(BaseModel):
+    """保存到配置的数据库连接（结构化字段）。"""
+
+    type: str | None = None
+    host: str | None = None
+    port: int | None = None
+    user: str | None = None
+    password: str | None = None
+    database: str | None = None
+    charset: str | None = None
+    url: str | None = None
 
 
 class AppState:
@@ -280,6 +302,64 @@ def create_app(config_path: str | None = None) -> FastAPI:
             "ok": not problems,
         }
 
+    # ---------------------------------------------------------------- 数据库连接
+
+    @app.get("/api/database")
+    def get_database() -> dict[str, Any]:
+        """读取配置里的 database 段（供页面回填连接表单）。"""
+        config = _current_config(state)
+        if config is None or config.database is None:
+            return {"configured": False}
+        spec = config.database
+        return {
+            "configured": True,
+            "type": spec.type or "mysql",
+            "host": spec.host,
+            "port": spec.port,
+            "user": spec.user,
+            "password": spec.password,
+            "database": spec.database,
+            "charset": spec.charset,
+            "url": spec.url,
+            "has_structured": spec.is_structured,
+            "masked": spec.describe(),
+        }
+
+    @app.put("/api/database")
+    def put_database(payload: DatabasePayload) -> dict[str, Any]:
+        """把连接信息写回 YAML 的 database 段。
+
+        **只替换 database 段**，其余文本（含注释、字段顺序）原样保留 ——
+        用 yaml.dump 重写整个文件会把用户写的注释全丢掉。
+        """
+        section = {
+            k: v
+            for k, v in payload.model_dump().items()
+            if v not in (None, "") and not (k == "charset" and v == "utf8mb4")
+        }
+        block = None
+        if section:
+            section.setdefault("type", "mysql")
+            block = "database:\n" + "\n".join(
+                f"  {k}: {_yaml_scalar(v)}" for k, v in section.items()
+            )
+
+        text = _replace_yaml_section(state.text, "database", block)
+        try:
+            config = state.parse(text)
+        except TableSeedError as exc:
+            raise HTTPException(status_code=400, detail=f"写回后配置不合法: {exc}") from exc
+
+        state.text = text
+        if state.config_path:
+            Path(state.config_path).write_text(text, encoding="utf-8")
+        return {
+            "text": text,
+            "saved": bool(state.config_path),
+            "path": state.config_path,
+            "masked": config.database.describe() if config.database else "未配置",
+        }
+
     # ---------------------------------------------------------------- 生成
 
     @app.post("/api/generate")
@@ -376,15 +456,15 @@ def create_app(config_path: str | None = None) -> FastAPI:
     # ---------------------------------------------------------------- SQL 查询台
 
     @app.post("/api/sql/ddl")
-    def get_ddl(payload: dict[str, Any]) -> dict[str, Any]:
+    def get_ddl(payload: DdlPayload) -> dict[str, Any]:
         """按表名反射建表语句（SQLAlchemy Inspector + CreateTable）。"""
-        url = payload.get("dsn") or (config.database.url if (config := _current_config()) and config.database else None)
-        table = payload.get("table")
+        url = _resolve_url(state, payload.dsn, payload.database)
         if not url:
-            raise HTTPException(status_code=400, detail="未配置数据库连接，无法获取建表语句")
-        if not table:
-            raise HTTPException(status_code=400, detail="缺少表名")
-        return {"ddl": _reflect_ddl(url, table)}
+            raise HTTPException(
+                status_code=400,
+                detail="未配置数据库连接 —— 在页面上填写连接信息，或保存到配置的 database 段",
+            )
+        return {"ddl": _reflect_ddl(url, payload.table)}
 
     @app.post("/api/sql/execute")
     def execute_sql(payload: SqlPayload) -> dict[str, Any]:
@@ -407,12 +487,14 @@ def create_app(config_path: str | None = None) -> FastAPI:
         except SqlRejected as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
-        url = payload.dsn or (config.database.url if config and config.database else None)
+        url = _resolve_url(state, payload.dsn, payload.database)
+        if not url and config and config.database:
+            url = config.database.resolved_url()
         if not url:
             raise HTTPException(
                 status_code=400,
-                detail="未配置数据库连接，无法执行查询。请在配置中填写 database.url，"
-                "或在页面上填入连接串。",
+                detail="未配置数据库连接 —— 在页面上填写连接信息，"
+                "或保存到配置的 database 段。",
             )
 
         max_rows = config.sql.max_rows if config else 1000
@@ -526,7 +608,32 @@ def _graph_edges(config: SeedConfig) -> list[dict[str, Any]]:
     return edges
 
 
-def _current_config() -> SeedConfig | None:
+def _resolve_url(
+    state: AppState, dsn: str | None, database: dict[str, Any] | None
+) -> str | None:
+    """按优先级取连接串：显式 dsn → 页面传的结构化连接 → 配置里的 database 段。
+
+    连接信息来自三处，优先级必须明确 —— 页面当前填的 > 配置里存的。
+    """
+    if dsn:
+        return dsn
+    if database:
+        from ..models import DatabaseSpec  # noqa: PLC0415
+
+        try:
+            spec = DatabaseSpec.model_validate(database)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400, detail=f"连接信息不完整或有误: {exc}"
+            ) from exc
+        url = spec.resolved_url()
+        if url:
+            return url
+    config = _current_config(state)
+    return config.database.resolved_url() if config and config.database else None
+
+
+def _current_config(state: AppState) -> SeedConfig | None:
     """解析当前文本配置；解析失败返回 None（各接口自行降级）。"""
     try:
         return state.parse(state.text)
@@ -565,6 +672,59 @@ def _reflect_ddl(url: str, table: str) -> str:
         raise SinkError(f"反射表 {table} 失败: {exc}") from exc
     finally:
         engine.dispose()
+
+
+def _yaml_scalar(value: Any) -> str:
+    """把一个标量渲染成 YAML 字面量（字符串加引号，数字/布尔原样）。"""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    text = str(value)
+    # 含特殊字符或形如数字的字符串要引起来，避免被 YAML 当成别的类型
+    if re.search(r"[:#\[\]{}&*!|>'\"%@`,\n]|^\s|\s$|^\d", text):
+        return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return text
+
+
+def _replace_yaml_section(text: str, key: str, block: str | None) -> str:
+    """替换顶层 YAML 段的文本，**其余内容一字不动**（保留注释与格式）。
+
+    定位 ``^key:`` 行后，吃掉其后续的缩进行（该段的子内容），再插入新段。
+    段不存在时追加到文件末尾。
+    """
+    lines = text.splitlines()
+    out: list[str] = []
+    index = 0
+    replaced = False
+
+    while index < len(lines):
+        line = lines[index]
+        if re.match(rf"^{re.escape(key)}\s*:", line):
+            index += 1
+            # 吃掉该段的子行（缩进行）；段尾的空行若后面仍是缩进行也算入
+            while index < len(lines):
+                current = lines[index]
+                if current.startswith((" ", "\t")):
+                    index += 1
+                    continue
+                if not current.strip() and index + 1 < len(lines) and lines[index + 1].startswith((" ", "\t")):
+                    index += 1
+                    continue
+                break
+            if block:
+                out.extend(block.splitlines())
+            replaced = True
+            continue
+        out.append(line)
+        index += 1
+
+    if not replaced and block:
+        if out and out[-1].strip():
+            out.append("")
+        out.extend(block.splitlines())
+
+    return "\n".join(out).rstrip("\n") + "\n"
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:

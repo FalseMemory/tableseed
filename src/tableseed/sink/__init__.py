@@ -33,7 +33,7 @@ def resolve_sink(
 ) -> Sink:
     """按「有无连接 / 有无 out」分派 sink。默认内存模式（不落盘）。"""
     database = config.database
-    url = dsn or (database.url if database else None)
+    url = dsn or (database.resolved_url() if database else None)
     resolved_dialect = (
         dialect
         or (database.dialect if database else None)

@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -205,12 +205,101 @@ class LimitsSpec(_Model):
 
 
 class DatabaseSpec(_Model):
-    """数据库连接。不提供即走内存模式（只生成不落盘）。"""
+    """数据库连接。不提供即走内存模式（只生成不落盘）。
+
+    两种写法（可混用，``url`` 优先）：
+
+    结构化 —— 页面上分行填写，YAML 里也一目了然::
+
+        database:
+          type: mysql          # mysql / postgresql / oracle
+          host: 127.0.0.1
+          port: 3306
+          user: root
+          password: ******
+          database: seedtest
+
+    或直接给完整连接串::
+
+        database:
+          url: mysql+pymysql://root:pwd@127.0.0.1:3306/seedtest?charset=utf8mb4
+
+    ⚠️ 密码以明文存在 YAML 里，注意不要把带密码的配置提交到版本库。
+    """
 
     url: str | None = None
-    dialect: str | None = None
+    type: str | None = None           # mysql / postgresql / oracle
+    host: str | None = None
+    port: int | None = None
+    user: str | None = None
+    password: str | None = None
+    database: str | None = None       # 库名
+    charset: str = "utf8mb4"
+
+    dialect: str | None = None        # 可选：显式指定 SQLAlchemy 方言
     batch_size: int = 1000
     dry_run: bool = False
+
+    #: 各类型默认端口（ClassVar：不参与 pydantic 字段校验）
+    DEFAULT_PORTS: ClassVar[dict[str, int]] = {
+        "mysql": 3306,
+        "postgresql": 5432,
+        "oracle": 1521,
+    }
+
+    @property
+    def is_structured(self) -> bool:
+        """是否具备拼出连接串的必要信息（而非只有 url）。"""
+        return bool(self.host and self.user and self.database)
+
+    def resolved_url(self) -> str | None:
+        """返回可直接交给 SQLAlchemy 的连接串。"""
+        if self.url:
+            return self.url
+        if not self.is_structured:
+            return None
+
+        kind = (self.type or "mysql").lower()
+        dial = self.dialect or _DRIVERS.get(kind, kind)
+        port = self.port or self.DEFAULT_PORTS.get(kind, 0)
+        user = _quote(self.user or "")
+        password = _quote(self.password or "")
+        auth = f"{user}:{password}" if password else user
+        host = f"{self.host}:{port}" if port else self.host
+
+        query = f"?charset={self.charset}" if kind == "mysql" else ""
+        return f"{dial}://{auth}@{host}/{self.database}{query}"
+
+    def describe(self) -> str:
+        """脱敏描述（不回显密码）。"""
+        url = self.resolved_url()
+        if not url:
+            return "未配置"
+        return _mask_password(url)
+
+
+#: 数据库类型 → SQLAlchemy 驱动别名（需要对应 driver 已安装）
+_DRIVERS = {
+    "mysql": "mysql+pymysql",
+    "mariadb": "mysql+pymysql",
+    "postgresql": "postgresql+psycopg2",
+    "postgres": "postgresql+psycopg2",
+    "oracle": "oracle+cx_oracle",
+}
+
+
+def _quote(value: str) -> str:
+    """URL 编码用户名/密码 —— 密码里带 @ : / 等字符时不编码会拼坏连接串。"""
+    from urllib.parse import quote_plus
+
+    return quote_plus(value)
+
+
+def _mask_password(url: str) -> str:
+    """把连接串里的密码替换成 ***。"""
+    import re
+
+    return re.sub(r"://([^:/@]+):[^@]*@", r"://\1:***@", url)
 
 
 class SqlSpec(_Model):

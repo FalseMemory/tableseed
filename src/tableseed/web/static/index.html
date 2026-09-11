@@ -100,6 +100,13 @@
     color: var(--text); padding: 7px 10px; font-size: 13px; font-family: inherit;
   }
   .row [data-gi] { min-width: 0; }
+
+  /* ---- 数据库连接卡片 ---- */
+  .db-card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
+    padding: 12px 14px; margin-bottom: 12px;
+  }
+  .db-card .row:last-child { margin-bottom: 0; }
   textarea.sqlbox {
     width: 100%; height: 110px; background: var(--panel); border: 1px solid var(--line);
     border-radius: 8px; padding: 10px 12px; color: var(--text); font-family: var(--mono); font-size: 13px; resize: vertical;
@@ -201,9 +208,34 @@
     </div>
 
     <div class="tab-body" id="tab-sql" hidden>
-      <div class="row">
-        <input type="text" class="grow" id="sql-dsn" placeholder="数据库连接串（留空则用配置中的 database.url）">
-        <input type="text" id="sql-table" placeholder="表名（用于快速获取建表语句）" style="width:220px">
+      <div class="db-card">
+        <div class="row" style="margin-bottom:8px">
+          <span class="hint" style="font-weight:500">数据库连接</span>
+          <span class="spacer"></span>
+          <span class="chip" id="db-state">未配置</span>
+          <button id="btn-db-load">读取配置</button>
+          <button id="btn-db-save">保存到配置</button>
+        </div>
+        <div class="row" style="margin-bottom:8px">
+          <select id="db-type" style="width:132px">
+            <option value="mysql">MySQL</option>
+            <option value="postgresql">PostgreSQL</option>
+            <option value="oracle">Oracle</option>
+          </select>
+          <input type="text" id="db-host" placeholder="地址" value="127.0.0.1" style="width:150px">
+          <input type="number" id="db-port" placeholder="端口" style="width:88px">
+          <input type="text" id="db-user" placeholder="用户名" style="width:120px">
+          <input type="password" id="db-password" placeholder="密码" style="width:130px">
+          <input type="text" id="db-name" placeholder="数据库名" style="flex:1;min-width:110px">
+        </div>
+        <div class="row" style="margin-bottom:0">
+          <input type="text" id="db-charset" placeholder="字符集（MySQL，默认 utf8mb4）" style="width:230px">
+          <span class="hint" id="db-masked"></span>
+        </div>
+      </div>
+
+      <div class="row" style="margin:12px 0 10px">
+        <input type="text" id="sql-table" placeholder="表名（用于获取建表语句 / 生成 INSERT）" style="width:280px">
         <button id="btn-sql-ddl">获取建表语句</button>
       </div>
       <textarea class="sqlbox" id="sql-text" spellcheck="false">SELECT 1</textarea>
@@ -743,6 +775,70 @@ async function runVerify() {
   }
 }
 
+// ---------------------------------------------------------------- 数据库连接
+
+const DB_DEFAULT_PORT = { mysql: 3306, postgresql: 5432, oracle: 1521 };
+
+function dbForm() {
+  return {
+    type: $("db-type").value,
+    host: $("db-host").value.trim(),
+    port: parseInt($("db-port").value, 10) || null,
+    user: $("db-user").value.trim(),
+    password: $("db-password").value,
+    database: $("db-name").value.trim(),
+    charset: $("db-charset").value.trim() || null,
+  };
+}
+
+function dbReady() {
+  const f = dbForm();
+  return Boolean(f.host && f.user && f.database);
+}
+
+function dbStatus(text, kind) {
+  const el = $("db-state");
+  el.textContent = text;
+  el.className = "chip" + (kind ? " " + kind : "");
+}
+
+async function loadDatabase() {
+  try {
+    const d = await api("/api/database");
+    if (!d.configured) { dbStatus("未配置（内存模式）"); return; }
+    $("db-type").value = d.type || "mysql";
+    $("db-host").value = d.host || "";
+    $("db-port").value = d.port || "";
+    $("db-user").value = d.user || "";
+    $("db-password").value = d.password || "";
+    $("db-name").value = d.database || "";
+    $("db-charset").value = d.charset || "";
+    $("db-masked").textContent = d.masked ? "已读取配置：" + d.masked : "";
+    dbStatus("已从配置读取", "on");
+  } catch (e) {
+    dbStatus("读取失败");
+  }
+}
+
+async function saveDatabase() {
+  const f = dbForm();
+  if (!f.host && !f.database) {
+    // 全空 = 清除 database 段
+  } else if (!dbReady()) {
+    $("db-masked").textContent = "地址 / 用户名 / 数据库名为必填";
+    return;
+  }
+  try {
+    const res = await api("/api/database", { method: "PUT", body: JSON.stringify(f) });
+    $("yaml").value = res.text;           // 左栏同步（含 database 段）
+    $("db-masked").textContent = "已保存：" + res.masked;
+    dbStatus(res.saved ? "已保存到 " + res.path : "已保存（仅内存）", "on");
+    await validate(true);
+  } catch (e) {
+    $("db-masked").textContent = "保存失败：" + e.message;
+  }
+}
+
 // ---------------------------------------------------------------- SQL 查询台
 
 function rowsToInserts(table, columns, rows, limit) {
@@ -758,11 +854,12 @@ async function fetchDDL() {
   const out = $("sql-out");
   const table = $("sql-table").value.trim();
   if (!table) { out.innerHTML = msg("warn", "请先填写表名"); return; }
+  if (!dbReady()) { out.innerHTML = msg("warn", "请先填写数据库连接（地址 / 用户名 / 数据库名）"); return; }
   out.innerHTML = '<div class="empty">反射表结构中…</div>';
   try {
     const res = await api("/api/sql/ddl", {
       method: "POST",
-      body: JSON.stringify({ table, dsn: $("sql-dsn").value || null }),
+      body: JSON.stringify({ table, database: dbForm() }),
     });
     out.innerHTML = `<div class="msg ok">${escapeHtml(table)} 的建表语句</div><textarea class="sqlbox" readonly style="height:220px">${escapeHtml(res.ddl)}</textarea>
       <div class="row" style="margin-top:8px"><button id="btn-ddl-to-imp">送到「快速生成」</button></div>`;
@@ -779,11 +876,12 @@ let lastQuery = null;  // 最近一次查询 {columns, rows}
 
 async function runSql() {
   const out = $("sql-out");
+  if (!dbReady()) { out.innerHTML = msg("warn", "请先填写数据库连接（地址 / 用户名 / 数据库名）"); return; }
   out.innerHTML = '<div class="empty">执行中…</div>';
   try {
     const res = await api("/api/sql/execute", {
       method: "POST",
-      body: JSON.stringify({ sql: $("sql-text").value, dsn: $("sql-dsn").value || null }),
+      body: JSON.stringify({ sql: $("sql-text").value, database: dbForm() }),
     });
     lastQuery = { columns: res.columns, rows: res.rows };
     const insertBtn = `<button id="btn-sql-insert">由查询结果生成 INSERT（前 10 行）</button>`;
@@ -791,9 +889,9 @@ async function runSql() {
     out.innerHTML = info + tableHtml(res.columns, res.rows);
     $("btn-sql-insert").addEventListener("click", () => {
       if (!lastQuery || !lastQuery.rows.length) return;
-      const table = guessTableName($("sql-text").value);
+      const table = $("sql-table").value.trim() || guessTableName($("sql-text").value);
       const text = rowsToInserts(table, lastQuery.columns, lastQuery.rows, 10);
-      out.innerHTML = `<div class="msg ok">已生成 ${Math.min(10, lastQuery.rows.length)} 条 INSERT（表名按 ${escapeHtml(table)} 推断，可自行修改）</div>
+      out.innerHTML = `<div class="msg ok">已生成 ${Math.min(10, lastQuery.rows.length)} 条 INSERT（表名 ${escapeHtml(table)}，可自行修改）</div>
         <textarea class="sqlbox" readonly style="height:220px">${escapeHtml(text)}</textarea>
         <div class="row" style="margin-top:8px"><button id="btn-ins-to-imp">送到「快速生成」</button></div>`;
       $("btn-ins-to-imp").addEventListener("click", () => {
@@ -833,6 +931,18 @@ $("btn-verify").addEventListener("click", runVerify);
 $("btn-import").addEventListener("click", runImport);
 $("btn-sql-ddl").addEventListener("click", fetchDDL);
 $("btn-editor-save").addEventListener("click", saveEditor);
+$("btn-db-load").addEventListener("click", loadDatabase);
+$("btn-db-save").addEventListener("click", saveDatabase);
+
+// 切换类型时自动带出该类型的默认端口
+$("db-type").addEventListener("change", (e) => {
+  if (!$("db-port").value) $("db-port").value = DB_DEFAULT_PORT[e.target.value] || "";
+});
+
+// 预演 / 生成 / 关系图依赖左栏文本；切到 SQL 台时把配置里的连接读进来
+document.querySelectorAll('.tabs button[data-tab="sql"]').forEach((b) => {
+  b.addEventListener("click", () => { if (!$("db-host").value) loadDatabase(); });
+});
 
 boot();
 </script>
