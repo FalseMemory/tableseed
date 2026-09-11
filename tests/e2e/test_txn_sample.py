@@ -19,9 +19,25 @@ from tableseed import service
 SAMPLE = Path(__file__).resolve().parents[2] / "samples" / "txn.yaml"
 
 
+def generate_in_memory(config):
+    """内存模式生成 —— 不碰数据库，测试与示例文件里的连接配置解耦。"""
+    from tableseed.sink import MemorySink
+
+    return service.generate(config, sink=MemorySink())
+
+
 @pytest.fixture(scope="module")
-def result():
-    return service.generate(service.load(SAMPLE))
+def config():
+    return service.load(SAMPLE)
+
+
+@pytest.fixture(scope="module")
+def result(config):
+    """显式走内存 sink —— 示例配置若带了 database 段，默认 generate 会直连入库。
+
+    测试不该依赖示例文件里有没有连接信息，也不该真去连库。
+    """
+    return generate_in_memory(config)
 
 
 @allure.epic("tableseed")
@@ -138,8 +154,9 @@ def test_backfill_has_no_warnings(result):
 
 @allure.story("同 seed 结果可复现")
 def test_generation_is_reproducible():
-    first = service.generate(service.load(SAMPLE))
-    second = service.generate(service.load(SAMPLE))
+    config = service.load(SAMPLE)
+    first = generate_in_memory(config)
+    second = generate_in_memory(config)
     for name in first.tables:
         assert first.tables[name].to_records() == second.tables[name].to_records()
 
@@ -147,7 +164,7 @@ def test_generation_is_reproducible():
 @allure.story("默认不落盘")
 def test_memory_mode_has_no_side_effect(result, tmp_path):
     """未提供 --out / --dsn 时不应产生任何文件。"""
-    service.generate(service.load(SAMPLE))
+    generate_in_memory(service.load(SAMPLE))
     assert list(tmp_path.iterdir()) == []
 
 

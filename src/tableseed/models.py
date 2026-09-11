@@ -216,7 +216,7 @@ class DatabaseSpec(_Model):
           host: 127.0.0.1
           port: 3306
           user: root
-          password: ******
+          password_env: TABLESEED_DB_PASSWORD   # 密码走环境变量，推荐
           database: seedtest
 
     或直接给完整连接串::
@@ -224,7 +224,8 @@ class DatabaseSpec(_Model):
         database:
           url: mysql+pymysql://root:pwd@127.0.0.1:3306/seedtest?charset=utf8mb4
 
-    ⚠️ 密码以明文存在 YAML 里，注意不要把带密码的配置提交到版本库。
+    ⚠️ ``password`` 是明文存在 YAML 里的，别把带密码的配置提交到版本库。
+    用 ``password_env`` 只写变量名，配置文件即可安全入库（环境变量优先于明文）。
     """
 
     url: str | None = None
@@ -233,6 +234,8 @@ class DatabaseSpec(_Model):
     port: int | None = None
     user: str | None = None
     password: str | None = None
+    #: 密码取自环境变量（推荐）—— YAML 里只写变量名，不落明文密码，配置文件可安全入库
+    password_env: str | None = None
     database: str | None = None       # 库名
     charset: str = "utf8mb4"
 
@@ -252,6 +255,40 @@ class DatabaseSpec(_Model):
         """是否具备拼出连接串的必要信息（而非只有 url）。"""
         return bool(self.host and self.user and self.database)
 
+    @property
+    def password_source(self) -> str:
+        """密码来源，用于脱敏展示与排错。"""
+        if self.password_env:
+            return f"env:{self.password_env}" + ("" if self._env_password() else "(未设置)")
+        if self.password:
+            return "inline"
+        return "none"
+
+    def _env_password(self) -> str | None:
+        import os
+
+        if not self.password_env:
+            return None
+        return os.environ.get(self.password_env)
+
+    def resolved_password(self) -> str | None:
+        """取实际密码：环境变量优先（更安全的存放方式），其次配置里的明文。"""
+        if self.password_env:
+            env_value = self._env_password()
+            if env_value is not None:
+                return env_value
+        return self.password
+
+    def env_problem(self) -> str | None:
+        """环境变量名写了但变量不存在 —— 这类问题要明确报出来，否则连接失败难查。"""
+        if self.password_env and self._env_password() is None:
+            return (
+                f"环境变量 {self.password_env} 未设置。"
+                f"可在命令行执行 setx {self.password_env} <密码>（Windows）"
+                f"或 export {self.password_env}=<密码>（Linux/macOS），然后重开终端。"
+            )
+        return None
+
     def resolved_url(self) -> str | None:
         """返回可直接交给 SQLAlchemy 的连接串。"""
         if self.url:
@@ -263,7 +300,7 @@ class DatabaseSpec(_Model):
         dial = self.dialect or _DRIVERS.get(kind, kind)
         port = self.port or self.DEFAULT_PORTS.get(kind, 0)
         user = _quote(self.user or "")
-        password = _quote(self.password or "")
+        password = _quote(self.resolved_password() or "")
         auth = f"{user}:{password}" if password else user
         host = f"{self.host}:{port}" if port else self.host
 
@@ -271,11 +308,15 @@ class DatabaseSpec(_Model):
         return f"{dial}://{auth}@{host}/{self.database}{query}"
 
     def describe(self) -> str:
-        """脱敏描述（不回显密码）。"""
+        """脱敏描述（不回显密码，并标出密码来源）。"""
         url = self.resolved_url()
         if not url:
             return "未配置"
-        return _mask_password(url)
+        masked = _mask_password(url)
+        if self.password_env and not self.url:
+            label = self.password_source
+            return f"{masked}  [密码来源 {label}]"
+        return masked
 
 
 #: 数据库类型 → SQLAlchemy 驱动别名（需要对应 driver 已安装）

@@ -228,8 +228,12 @@
           <input type="password" id="db-password" placeholder="密码" style="width:130px">
           <input type="text" id="db-name" placeholder="数据库名" style="flex:1;min-width:110px">
         </div>
+        <div class="row" style="margin-bottom:8px">
+          <input type="text" id="db-charset" placeholder="字符集（MySQL，默认 utf8mb4）" style="width:220px">
+          <input type="text" id="db-password-env" placeholder="或密码环境变量名（推荐）" style="width:240px">
+          <span class="hint">💡 用环境变量存密码，配置文件可安全入库</span>
+        </div>
         <div class="row" style="margin-bottom:0">
-          <input type="text" id="db-charset" placeholder="字符集（MySQL，默认 utf8mb4）" style="width:230px">
           <span class="hint" id="db-masked"></span>
         </div>
       </div>
@@ -786,6 +790,7 @@ function dbForm() {
     port: parseInt($("db-port").value, 10) || null,
     user: $("db-user").value.trim(),
     password: $("db-password").value,
+    password_env: $("db-password-env").value.trim() || null,
     database: $("db-name").value.trim(),
     charset: $("db-charset").value.trim() || null,
   };
@@ -811,10 +816,16 @@ async function loadDatabase() {
     $("db-port").value = d.port || "";
     $("db-user").value = d.user || "";
     $("db-password").value = d.password || "";
+    $("db-password-env").value = d.password_env || "";
     $("db-name").value = d.database || "";
     $("db-charset").value = d.charset || "";
-    $("db-masked").textContent = d.masked ? "已读取配置：" + d.masked : "";
-    dbStatus("已从配置读取", "on");
+    $("db-masked").textContent = d.masked ? "已读取：" + d.masked : "";
+    if (d.env_problem) {
+      $("db-masked").textContent = "⚠ " + d.env_problem;
+      dbStatus("密码环境变量未就绪");
+    } else {
+      dbStatus("已从配置读取", "on");
+    }
   } catch (e) {
     dbStatus("读取失败");
   }

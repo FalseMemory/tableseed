@@ -132,14 +132,17 @@ def test_ddl_only_draft_declares_rows():
 def test_edit_view_roundtrip():
     from pathlib import Path
 
+    from tableseed.sink import MemorySink
+
     sample = Path(__file__).resolve().parents[2] / "samples" / "txn.yaml"
     config = service.load(sample)
     view = to_edit_view(config)
     regenerated = service.load_text(from_edit_view(view))
 
     assert service.check(regenerated) == []
-    first = service.generate(config)
-    second = service.generate(regenerated)
+    # 显式内存 sink —— 示例配置可能带 database 段，默认 generate 会直连入库
+    first = service.generate(config, sink=MemorySink())
+    second = service.generate(regenerated, sink=MemorySink())
     for name in first.tables:
         assert first.tables[name].to_records() == second.tables[name].to_records()
 

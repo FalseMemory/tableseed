@@ -1,0 +1,243 @@
+# tableseed 示例 —— 多表联合造数（M2：表间关系）
+#
+# 场景：银行交易。一张交易表，配一张详情表（1:1）与一张操作日志表（1:N）。
+#
+#   t_txn        3 类型 × 3 渠道            =  9 行   （根表，笛卡尔积）
+#   t_txn_detail 每条交易 1 条详情          =  9 行   （1:1，分配不放大）
+#   t_txn_log    每条交易 3 步日志          = 27 行   （1:N，笛卡尔积放大）
+#
+# 关键看点：
+#   1. join 锚点自动补齐 copy —— 不必为主键重复写传播规则
+#   2. copy / derive / map / free 四种传播模式
+#   3. drive_by 驱动 follow_parent 分配：同交易类型 → 同详情状态（保一致）
+#      同时不同交易类型轮转取不同状态（保覆盖）
+#
+# 验收：docs/PRD.md 第 7 节
+
+seed: 20260910
+
+limits:
+  max_rows: 100000
+  strategy: full
+
+tables:
+  # ============================================================ 父表：交易
+  - name: t_txn
+    columns:
+      - {name: txn_no, type: string, primary_key: true}
+      - {name: txn_type, type: string}
+      - {name: txn_type_desc, type: string}
+      - {name: channel, type: string}
+      - {name: currency, type: string}
+      - {name: amount, type: decimal, scale: 2}
+      - {name: fee, type: decimal, scale: 2}
+      - {name: tenant_id, type: string}
+      # 以下两个字段由 Phase 2 反向回填（子表汇总得出）
+      - {name: detail_amount_sum, type: decimal, scale: 2}
+      - {name: log_count, type: int}
+
+    groups:
+      # ---- 有限取值组：3 × 3 = 9 组合 ----
+      - type: enum
+        name: g_txn_type
+        fields: [txn_type, txn_type_desc]
+        values:
+          - ["T", "转账"]
+          - ["D", "存款"]
+          - ["W", "取款"]
+
+      - type: enum
+        name: g_channel
+        fields: [channel]
+        values:
+          - ["OTC"]
+          - ["EBANK"]
+          - ["MOBILE"]
+
+      # ---- 每行附着组 ----
+      - type: sequence
+        name: g_txn_no
+        fields: [txn_no]
+        start: 1
+        format: "TXN{seq:08d}"
+
+      - type: random
+        name: g_currency
+        fields: [currency]
+        generator: choice
+        values:
+          - ["CNY"]
+          - ["USD"]
+          - ["HKD"]
+
+      - type: random
+        name: g_amount
+        fields: [amount]
+        generator: weighted_int
+        range: [100, 1000000]
+        buckets: [0.70, 0.20, 0.10]        # 小额 / 中额 / 大额
+
+      - type: const
+        name: g_tenant
+        fields: [tenant_id]
+        value: ["0001"]
+
+      - type: derive
+        name: g_fee
+        fields: [fee]
+        expr: "round(amount * 0.001, 2)"
+
+      # ---- 跨表汇总组：Phase 2 反向回填 ----
+      # 明细金额合计 —— 来自子表 t_txn_detail（1:1，每条交易一条明细）
+      - type: aggregate
+        name: g_detail_sum
+        fields: [detail_amount_sum]
+        from: t_txn_detail
+        expr: "sum(net_amount)"
+
+      # 日志条数 —— 来自子表 t_txn_log（1:N，每条交易 3 条日志）
+      - type: aggregate
+        name: g_log_count
+        fields: [log_count]
+        from: t_txn_log
+        expr: "count()"
+
+  # ============================================== 子表：交易详情（1:1）
+  - name: t_txn_detail
+    columns:
+      - {name: txn_no, type: string, primary_key: true}
+      - {name: currency, type: string}
+      - {name: detail_type, type: string}
+      - {name: settle_status, type: string}
+      - {name: settle_status_desc, type: string}
+      - {name: net_amount, type: decimal, scale: 2}
+      - {name: remark, type: string}
+
+    groups:
+      # 1:1 下这个有限组不做笛卡尔积 —— 由分配策略决定每条父行取哪个组合
+      - type: enum
+        name: g_settle
+        fields: [settle_status, settle_status_desc]
+        values:
+          - ["S0", "未清算"]
+          - ["S1", "已清算"]
+          - ["S2", "清算失败"]
+        allocation: follow_parent
+
+      - type: random
+        name: g_remark
+        fields: [remark]
+        generator: choice
+        values:
+          - ["系统自动"]
+          - ["柜员录入"]
+
+  # ============================================== 子表：交易分录（split 拆分）
+  - name: t_txn_item
+    columns:
+      - {name: txn_no, type: string}
+      - {name: item_amt, type: decimal, scale: 2}
+      - {name: memo, type: string}
+
+    groups:
+      - type: const
+        name: g_memo
+        fields: [memo]
+        value: ["记账分录"]
+
+  # ============================================== 子表：操作日志（1:N）
+  - name: t_txn_log
+    columns:
+      - {name: txn_no, type: string}
+      - {name: step, type: string}
+      - {name: step_desc, type: string}
+      - {name: operator, type: string}
+
+    groups:
+      # 1:N 下这个有限组做完整笛卡尔积 —— 每条交易 3 条日志
+      - type: enum
+        name: g_step
+        fields: [step, step_desc]
+        values:
+          - ["10", "受理"]
+          - ["20", "复核"]
+          - ["30", "记账"]
+
+      - type: const
+        name: g_operator
+        fields: [operator]
+        value: ["AUTO"]
+
+relations:
+  # ---------------------------------------------- 交易 → 详情（1:1）
+  - parent: t_txn
+    child: t_txn_detail
+    cardinality: "1:1"
+    existence: required
+    join:
+      - {parent_field: txn_no, child_field: txn_no}   # 自动补齐 copy
+    drive_by: [txn_type]        # 同交易类型 → 同清算状态
+    propagate:
+      - {mode: copy, to: currency, from: currency}
+      # 码值映射：父子系统的交易类型编码不一样
+      - mode: map
+        to: detail_type
+        from: txn_type
+        mapping: {T: "TRANSFER", D: "DEPOSIT", W: "WITHDRAW"}
+      # 表达式派生：净额 = 交易金额 - 手续费，可引用 parent.*
+      - {mode: derive, to: net_amount, expr: "parent.amount - parent.fee"}
+
+  # ---------------------------------------------- 交易 → 日志（1:N）
+  - parent: t_txn
+    child: t_txn_log
+    cardinality: "1:N"
+    existence: required
+    join:
+      - {parent_field: txn_no, child_field: txn_no}   # 自动补齐 copy
+    propagate: []                                     # 除主键外无其他字段需要对上
+
+  # ---------------------------------------------- 交易 → 分录（split 拆分）
+  # 每笔交易金额拆成 2 笔分录，Σ分录 = 交易金额（割点法拆分，零误差）
+  - parent: t_txn
+    child: t_txn_item
+    cardinality: "1:N"
+    existence: required
+    join:
+      - {parent_field: txn_no, child_field: txn_no}
+    propagate:
+      - {mode: split, to: item_amt, from: amount, parts: 2}
+
+# ============================================================ 不变量
+# 把「对得上」声明成可校验的断言；tableseed verify 逐条求值并列出违例行
+invariants:
+  # 手续费不得超过交易金额（行级断言）
+  - table: t_txn
+    expr: "fee <= amount"
+
+  # 明细净额合计 = 交易金额 - 手续费（跨表断言，1:1 下即相等）
+  - table: t_txn
+    from: t_txn_detail
+    expr: "sum(net_amount) = amount - fee"
+
+  # 每条交易恰好 3 条操作日志（跨表断言，1:N）
+  - table: t_txn
+    from: t_txn_log
+    expr: "count() = 3"
+
+  # split 守恒：分录金额合计 = 交易金额
+  - table: t_txn
+    from: t_txn_item
+    expr: "sum(item_amt) = amount"
+
+# ============================================================ 数据库连接
+# 密码走环境变量，YAML 里不落明文 —— 这份配置可以安全入库
+# 环境变量设置（Windows）: setx TABLESEED_DB_PASSWORD <你的密码>
+# 注意: setx 设置后需要新开终端才生效
+database:
+  type: mysql
+  host: 127.0.0.1
+  port: 3306
+  user: root
+  password_env: TABLESEED_DB_PASSWORD
+  database: testdb
+  charset: utf8mb4

@@ -12,7 +12,9 @@ rem    start.bat -c samples\account.yaml  指定配置
 rem ============================================================
 
 set "PORT=8643"
+rem 本地工作配置优先: 存在带数据库连接的 txn-mysql.yaml 时用它
 set "CONFIG=samples\txn.yaml"
+if exist "samples\txn-mysql.yaml" set "CONFIG=samples\txn-mysql.yaml"
 
 :parse
 if "%~1"=="-p"        (set "PORT=%~2"     & shift & shift & goto parse)

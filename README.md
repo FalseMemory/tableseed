@@ -491,6 +491,33 @@ t_account     枚举组: g_status(2) × g_currency(2) × g_channel(3) = 12 组�
 组合总数 15，未超 max_rows(100000)                              ✓ 校验通过
 ```
 
+# 数据库连接
+
+出现在配置里即**直连入库**（不写 `database` 段则纯内存模式，不落盘）。
+
+页面上（SQL 查询台）按行填写即可，也能从 YAML 读回：
+
+```yaml
+database:
+  type: mysql                 # mysql / postgresql / oracle
+  host: 127.0.0.1
+  port: 3306                  # 不填按类型取默认（3306 / 5432 / 1521）
+  user: root
+  password_env: TABLESEED_DB_PASSWORD   # 密码走环境变量 —— 推荐
+  database: testdb
+  charset: utf8mb4
+```
+
+- **密码优先取环境变量**（`password_env`），其次才是明文 `password`。
+  只写变量名的话，配置文件可以安全入库；页面回显一律脱敏（`***`）。
+  环境变量未设置时会明确报出来，并给出 `setx` 的写法 —— 不会让你对着
+  「Access denied ... using password: NO」猜半天。
+- 密码里的 `@ : / #` 会自动做 URL 编码，不会把连接串拼坏。
+- 也可以直接给完整连接串：`url: mysql+pymysql://user:pwd@host:3306/db`（优先级最高）。
+- 保存连接信息时**只替换 `database` 段**，配置里其余的注释与格式原样保留。
+
+示例：[samples/txn-mysql.yaml](samples/txn-mysql.yaml)（带连接段，密码走环境变量）。
+
 # 设计原则
 
 1. **声明式** —— 规则写在配置里，不写脚本；配置可 diff、可评审、可版本化。
@@ -524,7 +551,7 @@ t_account     枚举组: g_status(2) × g_currency(2) × g_channel(3) = 12 组�
 
 # 状态
 
-M1–M4 内核全部完成（单表、表间关系、aggregate 回填、不变量、覆盖策略、split 拆分、生成后自检），**188 条测试通过**。仅剩 M4 收尾的多父（N:M）与 M5 打磨。
+M1–M4 内核全部完成（单表、表间关系、aggregate 回填、不变量、覆盖策略、split 拆分、生成后自检），WebUI 含关系图 / 配置编辑器 / 快速生成 / SQL 台，**220 条测试通过**。仅剩 M4 收尾的多父（N:M）与 M5 打磨。
 
 生成结束会自动跑「生成后自检」：配置里声明了 `invariants` 就逐条求值，CLI 显示 `✓ 自检: 3 条不变量全部通过`（或违例明细），WebUI 结果页同样展示。
 

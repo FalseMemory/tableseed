@@ -105,6 +105,7 @@ class DatabasePayload(BaseModel):
     port: int | None = None
     user: str | None = None
     password: str | None = None
+    password_env: str | None = None
     database: str | None = None
     charset: str | None = None
     url: str | None = None
@@ -318,11 +319,14 @@ def create_app(config_path: str | None = None) -> FastAPI:
             "port": spec.port,
             "user": spec.user,
             "password": spec.password,
+            "password_env": spec.password_env,
             "database": spec.database,
             "charset": spec.charset,
             "url": spec.url,
             "has_structured": spec.is_structured,
             "masked": spec.describe(),
+            "password_source": spec.password_source,
+            "env_problem": spec.env_problem(),
         }
 
     @app.put("/api/database")
@@ -626,11 +630,19 @@ def _resolve_url(
             raise HTTPException(
                 status_code=400, detail=f"连接信息不完整或有误: {exc}"
             ) from exc
+        problem = spec.env_problem()
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
         url = spec.resolved_url()
         if url:
             return url
     config = _current_config(state)
-    return config.database.resolved_url() if config and config.database else None
+    if config and config.database:
+        problem = config.database.env_problem()
+        if problem:
+            raise HTTPException(status_code=400, detail=problem)
+        return config.database.resolved_url()
+    return None
 
 
 def _current_config(state: AppState) -> SeedConfig | None:

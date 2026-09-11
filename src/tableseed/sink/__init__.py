@@ -33,6 +33,16 @@ def resolve_sink(
 ) -> Sink:
     """按「有无连接 / 有无 out」分派 sink。默认内存模式（不落盘）。"""
     database = config.database
+
+    # 密码环境变量缺失时明确指出 —— 否则会拼出无密码连接串去撞数据库，
+    # 报出来的是「Access denied ... using password: NO」，看不出真正原因
+    if database and not dsn:
+        problem = database.env_problem()
+        if problem:
+            from ..errors import SinkError  # noqa: PLC0415
+
+            raise SinkError(problem)
+
     url = dsn or (database.resolved_url() if database else None)
     resolved_dialect = (
         dialect

@@ -75,6 +75,97 @@ def test_incomplete_spec_returns_none():
     assert DatabaseSpec().describe() == "未配置"
 
 
+# ---------------------------------------------------------------- 密码走环境变量
+
+
+@allure.feature("数据库连接")
+@allure.story("密码取自环境变量，不进 YAML")
+def test_password_from_env(monkeypatch):
+    monkeypatch.setenv("TABLESEED_TEST_PWD", "s3cr3t")
+    spec = DatabaseSpec(
+        type="mysql", host="h", user="root",
+        password_env="TABLESEED_TEST_PWD", database="d",
+    )
+    assert spec.resolved_password() == "s3cr3t"
+    assert "s3cr3t" in spec.resolved_url()
+    assert spec.password_source == "env:TABLESEED_TEST_PWD"
+    assert spec.env_problem() is None
+
+
+@allure.story("环境变量优先于配置里的明文密码")
+def test_env_password_wins(monkeypatch):
+    monkeypatch.setenv("TABLESEED_TEST_PWD", "from-env")
+    spec = DatabaseSpec(
+        type="mysql", host="h", user="root", password="from-yaml",
+        password_env="TABLESEED_TEST_PWD", database="d",
+    )
+    assert spec.resolved_password() == "from-env"
+
+
+@allure.story("环境变量名写了但变量不存在 → 明确报错")
+def test_missing_env_is_reported(monkeypatch):
+    monkeypatch.delenv("TABLESEED_ABSENT_PWD", raising=False)
+    spec = DatabaseSpec(
+        type="mysql", host="h", user="root",
+        password_env="TABLESEED_ABSENT_PWD", database="d",
+    )
+    problem = spec.env_problem()
+    assert problem and "TABLESEED_ABSENT_PWD" in problem
+    assert "未设置" in problem
+
+
+@allure.story("密码来源标注在脱敏串上")
+def test_source_is_annotated(monkeypatch):
+    monkeypatch.setenv("TABLESEED_TEST_PWD", "x")
+    spec = DatabaseSpec(
+        type="mysql", host="h", user="root",
+        password_env="TABLESEED_TEST_PWD", database="d",
+    )
+    described = spec.describe()
+    assert "***" in described and "x" not in described.replace("env:", "")
+    assert "env:TABLESEED_TEST_PWD" in described
+
+
+@allure.feature("数据库连接")
+@allure.story("保存 password_env 到 YAML，不落明文")
+def test_save_password_env_to_yaml():
+    client = TestClient(create_app())
+    client.put("/api/config", json={"text": CONFIG})
+
+    saved = client.put(
+        "/api/database",
+        json={
+            "type": "mysql", "host": "127.0.0.1", "port": 3306, "user": "root",
+            "password_env": "TABLESEED_DB_PASSWORD", "database": "testdb",
+        },
+    ).json()
+    assert "password_env: TABLESEED_DB_PASSWORD" in saved["text"]
+    assert "password:" not in saved["text"]          # 不写明文键
+
+    loaded = client.get("/api/database").json()
+    assert loaded["password_env"] == "TABLESEED_DB_PASSWORD"
+
+
+@allure.story("环境变量缺失时查询给出可操作提示")
+def test_query_reports_missing_env(monkeypatch):
+    monkeypatch.delenv("TABLESEED_MISSING_PWD", raising=False)
+    client = TestClient(create_app())
+    client.put("/api/config", json={"text": CONFIG})
+    client.put(
+        "/api/database",
+        json={
+            "type": "mysql", "host": "127.0.0.1", "port": 3306, "user": "root",
+            "password_env": "TABLESEED_MISSING_PWD", "database": "testdb",
+        },
+    )
+
+    res = client.post("/api/sql/execute", json={"sql": "SELECT 1"})
+    assert res.status_code == 400
+    detail = res.json()["detail"]
+    assert "TABLESEED_MISSING_PWD" in detail
+    assert "setx" in detail                          # 给出怎么设的指引
+
+
 # ---------------------------------------------------------------- YAML 段替换
 
 
