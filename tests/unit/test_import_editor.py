@@ -88,6 +88,42 @@ def test_generated_yaml_is_loadable():
     assert len(result.tables["t_demo"]) == 4  # status 2 值 × acct_no 2 值
 
 
+@allure.feature("快速生成")
+@allure.story("主键必须唯一：带样例也用 sequence")
+def test_primary_key_always_sequence():
+    """主键若按样例生成 enum，会造出重复主键 —— 必须走 sequence。"""
+    from tableseed.config.ddl_import import Column, _infer_type
+
+    pk_with_samples = Column(name="id", type_raw="bigint", primary_key=True, samples=[1, 2, 3])
+    assert _infer_type(pk_with_samples) == "sequence"
+
+    # 对照：非主键的低基数字符串列仍走 enum（样例就是天然候选）
+    status = Column(name="status", type_raw="char(2)", samples=["01", "02"])
+    assert _infer_type(status) == "enum"
+
+    # 端到端：生成结果里主键不重复
+    result = service.generate(service.load_text(full_config()))
+    ids = [r.values["id"] for r in result.tables["t_demo"].rows]
+    assert len(set(ids)) == len(ids)
+
+
+@allure.story("无样例的纯 DDL 草稿自动声明 rows 行数")
+def test_ddl_only_draft_declares_rows():
+    """没有 INSERT 样例时字段全是逐行组 —— 必须补 rows，否则配置一拿就报错。"""
+    from tableseed.config.ddl_import import generate_yaml
+
+    text = generate_yaml(
+        "CREATE TABLE t_x (id bigint NOT NULL, acct_no varchar(32), "
+        "balance decimal(18,2), PRIMARY KEY (id));"
+    )
+    assert "rows:" in text
+
+    config = service.load_text(text)
+    assert service.check(config) == []
+    result = service.generate(config)
+    assert len(result.tables["t_x"]) == 100  # rows: 100
+
+
 # ---------------------------------------------------------------- 结构化编辑
 
 

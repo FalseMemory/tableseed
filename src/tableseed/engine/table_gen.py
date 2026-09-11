@@ -51,10 +51,18 @@ def generate_table(
     finite = finite_groups(table)
     attaches = attach_groups(table)
 
-    total_combos = combo_count(finite)
-    if total_combos == 0:
+    # 注意：空集合的笛卡尔积是 1（不是 0）—— 「没有有限组」必须用 not finite 判断，
+    # 用 combo_count == 0 当条件会永远不成立
+    if finite and combo_count(finite) == 0:
         raise GenerateError(
             f"表 {table.name} 的有限取值组组合数为 0（某个组的 values 为空）",
+            f"tables[{table.name}]",
+        )
+
+    declared_rows = table.rows or 0
+    if not finite and not declared_rows:
+        raise GenerateError(
+            f"表 {table.name} 没有任何有限取值组，也没有声明 rows，无法确定行数",
             f"tables[{table.name}]",
         )
 
@@ -62,11 +70,16 @@ def generate_table(
     excludes = _compile_excludes(config, funcs)
 
     strategy = config.limits.strategy
-    skeletons = (
-        expand_skeleton(finite)
-        if strategy == "full"
-        else expand_by_strategy(finite, strategy, config.limits.sample_size, rng, max_rows)
-    )
+    if not finite:
+        # 全为逐行组（random / sequence / derive…）→ 没有笛卡尔积可展开，
+        # 行数由声明式 rows 给出。给"纯随机表"留一条行数来源。
+        skeletons: Iterator[dict[str, Any]] = iter([{} for _ in range(declared_rows)])
+    elif strategy == "full":
+        skeletons = expand_skeleton(finite)
+    else:
+        skeletons = expand_by_strategy(
+            finite, strategy, config.limits.sample_size, rng, max_rows
+        )
 
     rows: list[GeneratedRow] = []
     truncated = False
@@ -81,7 +94,9 @@ def generate_table(
 
         rows.append(GeneratedRow(table=table.name, seq=seq, values=values))
         if len(rows) >= max_rows:
-            truncated = total_combos > max_rows or config.limits.strategy != "full"
+            truncated = bool(finite) and combo_count(finite) > max_rows or (
+                bool(finite) and strategy != "full"
+            )
             break
 
     return _finish(table, rows, truncated)

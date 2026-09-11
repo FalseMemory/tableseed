@@ -252,8 +252,10 @@ function tableHtml(columns, rows) {
   if (!columns.length) return '<div class="empty">无字段</div>';
   const head = columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
   const body = rows.map((row) => {
-    const cells = columns.map((c) => {
-      const v = row[c];
+    // 行支持两种形态：按列名索引的对象（数据行）/ 与 columns 等长的数组（预演、关系明细）
+    const asArray = Array.isArray(row);
+    const cells = columns.map((c, i) => {
+      const v = asArray ? row[i] : row[c];
       const cls = typeof v === "number" ? ' class="num"' : "";
       return `<td${cls}>${escapeHtml(v === null || v === undefined ? "NULL" : v)}</td>`;
     }).join("");
@@ -357,7 +359,7 @@ async function runGraph() {
 function renderGraph(g) {
   if (!g.nodes.length) return '<div class="empty">配置里还没有表。</div>';
 
-  const NODE_W = 186, NODE_H = 58, GAP_X = 128, GAP_Y = 34, PAD = 24;
+  const NODE_W = 196, NODE_H = 80, GAP_X = 132, GAP_Y = 34, PAD = 24;
 
   // 按 layer 分列，列内纵向排开
   const cols = {};
@@ -412,11 +414,17 @@ function renderGraph(g) {
     svg += `<g class="node" transform="translate(${p.x},${p.y})"><title>${escapeHtml(n.fields.join("\n"))}</title>`;
     svg += `<rect class="g-node-box${n.is_root ? " root" : ""}" width="${NODE_W}" height="${NODE_H}" rx="9"/>`;
     svg += `<text class="g-node-title" x="13" y="23">${escapeHtml(n.name)}</text>`;
-    svg += `<text class="g-node-meta" x="13" y="41">${n.field_count} 字段 · ${n.finite_count} 有限组</text>`;
-    if (n.is_root) svg += `<text class="g-node-meta" x="${NODE_W - 12}" y="23" text-anchor="end" fill="var(--accent)">根表</text>`;
+    if (n.is_root) svg += `<text class="g-node-meta" x="${NODE_W - 12}" y="64" text-anchor="end" fill="var(--accent)">根表</text>`;
+    svg += `<text class="g-node-meta" x="13" y="42">${n.field_count} 字段 · ${n.finite_count} 有限组</text>`;
+
+    // 汇总组徽章独占底部一行 —— 与字段数同行会重叠
     if (n.aggregates.length) {
-      svg += `<rect class="g-group-chip" x="13" y="46" width="${n.aggregates.length * 9 + 34}" height="0" rx="4"/>`;
-      svg += `<text class="g-group-text" x="${NODE_W - 12}" y="41" text-anchor="end">${escapeHtml(n.aggregates.join(","))}</text>`;
+      const label = "汇总 " + n.aggregates.length + " 组";
+      const width = label.length * 7 + 14;
+      svg += `<rect class="g-group-chip" x="13" y="52" width="${width}" height="17" rx="8"/>`;
+      svg += `<text class="g-group-text" x="${13 + width / 2}" y="64" text-anchor="middle">${escapeHtml(label)}</text>`;
+      // 组名列表放进 title 提示，不再堆在节点上
+      svg += `<title>${escapeHtml("汇总组: " + n.aggregates.join(", "))}</title>`;
     }
     svg += `</g>`;
   });

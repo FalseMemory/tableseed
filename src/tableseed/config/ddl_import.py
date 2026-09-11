@@ -234,10 +234,10 @@ def generate_yaml(
     for column in columns:
         column.samples = samples.get(column.name, [])
 
-    lines = [
-        f"# 由建表语句与 INSERT 样例自动生成 —— 字段分组为草稿, 请按需调整",
+    head = [
+        "# 由建表语句与 INSERT 样例自动生成 —— 字段分组为草稿, 请按需调整",
         f"# 表: {table_name}  生成时间标记见 seed",
-        "seed: 20260910" if seed == 20260910 else f"seed: {seed}",
+        f"seed: {seed}",
         "",
         "limits:",
         "  max_rows: 100000",
@@ -245,13 +245,20 @@ def generate_yaml(
         "",
         "tables:",
         f"  - name: {table_name}",
-        "    groups:",
     ]
 
     used_names: set[str] = set()
+    used_types: set[str] = set()
+    body: list[str] = []
     for column in columns:
-        lines.extend(_group_lines(column, table_name, used_names))
+        body.extend(_group_lines(column, table_name, used_names, used_types))
 
+    # 没有任何有限取值组（字段全是 random / sequence / derive）→ 笛卡尔积无从展开，
+    # 必须显式声明行数，否则配置一拿就报错
+    if not (used_types & {"enum", "boundary", "dict"}):
+        head.append("    rows: 100   # 全为逐行组, 行数按此声明")
+
+    lines = [*head, "    groups:", *body]
     return "\n".join(lines) + "\n"
 
 
@@ -262,70 +269,81 @@ def _unique_group_name(column: Column, table_name: str, used: set[str]) -> str:
     return f"g_{table_name}_{column.name}"
 
 
-def _group_lines(column: Column, table_name: str, used: set[str]) -> list[str]:
-    """一列 → 一个组的 YAML 片段（启发式见模块 docstring）。"""
-    name = _unique_group_name(column, table_name, used)
-    used.add(name)
-    indent = "      "
-    base = f"{indent}- type: {{type}}\n{indent}  name: {name}\n{indent}  fields: [{column.name}]"
-    samples = [v for v in column.samples if v is not None]
-    base_type = (column.type_raw or "").lower()
+def _infer_type(column: Column) -> str:
+    """推断一列该用哪种组 —— 判断只有这一处，渲染与统计共用，避免漂移。
 
-    # ---- 编号类：主键 / _no / _id 后缀 ----
+    返回 sequence / const / enum / random 之一。
+    """
+    base_type = (column.type_raw or "").lower()
+    samples = [v for v in column.samples if v is not None]
     is_id_like = bool(
         column.primary_key or re.search(r"(_no|_id|_seq)$", column.name, re.IGNORECASE)
     )
-    if is_id_like and not samples:
+
+    # 主键必须唯一 —— 无论样例多少都用 sequence
+    if column.primary_key or (is_id_like and not samples):
+        return "sequence"
+    # 样例值完全一致 → const
+    if samples and len(set(map(str, samples))) == 1:
+        return "const"
+    # 数值与日期：类型优先于取值枚举（金额不该被样例限死成 enum）
+    if re.match(r"^(decimal|numeric|number|int|bigint|smallint|tinyint|integer)", base_type):
+        return "random"
+    if re.match(r"^(date|datetime|timestamp)", base_type):
+        return "random"
+    # 字符串：样例值就是天然的枚举候选
+    if samples:
+        return "enum"
+    return "random"
+
+
+def _group_lines(
+    column: Column, table_name: str, used: set[str], used_types: set[str] | None = None
+) -> list[str]:
+    """一列 → 一个组的 YAML 片段（启发式见模块 docstring）。"""
+    name = _unique_group_name(column, table_name, used)
+    used.add(name)
+    kind = _infer_type(column)
+    if used_types is not None:
+        used_types.add(kind)
+
+    indent = "      "
+    base = f"{indent}- type: {kind}\n{indent}  name: {name}\n{indent}  fields: [{column.name}]"
+    samples = [v for v in column.samples if v is not None]
+    base_type = (column.type_raw or "").lower()
+
+    if kind == "sequence":
         if re.match(r"^(bigint|int|smallint|tinyint|integer)", base_type):
-            # 整型主键：纯数字递增，不加前缀
-            return _render(base.replace("{type}", "sequence"), name, indent,
-                           extra=["start: 1"])
-        return _render(base.replace("{type}", "sequence"), name, indent,
+            return _render(base, name, indent, extra=["start: 1"])
+        return _render(base, name, indent,
                        extra=["start: 1", f'format: "{column.name}_{{seq:06d}}"'])
 
-    # ---- 样例值完全一致 → const ----
-    if samples and len(set(map(str, samples))) == 1:
-        return _render(
-            base.replace("{type}", "const"), name, indent,
-            extra=[f"value: [{_y(samples[0])}]"],
-        )
+    if kind == "const":
+        return _render(base, name, indent, extra=[f"value: [{_y(samples[0])}]"])
 
-    # ---- 数值与日期：类型优先于取值枚举 ----
-    # （金额、数量不该被样例值限死成 enum —— 那是造数要生成的维度）
+    if kind == "enum":
+        distinct = list(dict.fromkeys(samples))
+        values = ", ".join(f"[{_y(v)}]" for v in distinct[:8])
+        return _render(base, name, indent, extra=[f"values: [{values}]"])
+
+    # random：按列类型选生成器
     if re.match(r"^(decimal|numeric|number)", base_type):
         scale = _scale_of_type(base_type)
         low, high = _numeric_range(samples, float)
-        return _render(base.replace("{type}", "random"), name, indent, extra=[
+        return _render(base, name, indent, extra=[
             "generator: decimal", f"range: [{low}, {high}]", f"scale: {scale}",
         ])
     if re.match(r"^(int|bigint|smallint|tinyint|integer)", base_type):
         low, high = _numeric_range(samples, int)
-        return _render(base.replace("{type}", "random"), name, indent, extra=[
+        return _render(base, name, indent, extra=[
             "generator: int", f"range: [{low}, {high}]",
         ])
-
-    # ---- 日期 ----
     if re.match(r"^(date|datetime|timestamp)", base_type):
         anchor = samples[0] if samples else "2026-01-01"
-        return _render(base.replace("{type}", "random"), name, indent, extra=[
+        return _render(base, name, indent, extra=[
             "generator: date", f'range: ["{anchor}", "2026-12-31"]',
         ])
-
-    # ---- 样例 distinct 少 → enum ----
-    distinct = list(dict.fromkeys(samples))
-    if 1 < len(distinct) <= 8:
-        values = ", ".join(f"[{_y(v)}]" for v in distinct)
-        return _render(base.replace("{type}", "enum"), name, indent,
-                       extra=[f"values: [{values}]"])
-
-    # ---- 兜底：有样例 → enum；否则字符串 ----
-    if samples:
-        values = ", ".join(f"[{_y(v)}]" for v in distinct[:8])
-        return _render(base.replace("{type}", "enum"), name, indent,
-                       extra=[f"values: [{values}]"])
-    return _render(base.replace("{type}", "random"), name, indent, extra=[
-        "generator: string", "range: [6, 16]",
-    ])
+    return _render(base, name, indent, extra=["generator: string", "range: [6, 16]"])
 
 
 def _render(template: str, name: str, indent: str, extra: list[str]) -> list[str]:

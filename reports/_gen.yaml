@@ -1,0 +1,63 @@
+# 由建表语句与 INSERT 样例自动生成 —— 字段分组为草稿, 请按需调整
+# 表: t_account  生成时间标记见 seed
+seed: 20260910
+
+limits:
+  max_rows: 100000
+  strategy: full
+
+tables:
+  - name: t_account
+    groups:
+      - type: sequence
+        name: g_acct_no
+        fields: [acct_no]
+        start: 1
+        format: "acct_no_{seq:06d}"
+      - type: random
+        name: g_status_code
+        fields: [status_code]
+        generator: string
+        range: [6, 16]
+      - type: random
+        name: g_status_desc
+        fields: [status_desc]
+        generator: string
+        range: [6, 16]
+      - type: random
+        name: g_currency
+        fields: [currency]
+        generator: string
+        range: [6, 16]
+      - type: random
+        name: g_channel
+        fields: [channel]
+        generator: string
+        range: [6, 16]
+      - type: random
+        name: g_balance
+        fields: [balance]
+        generator: decimal
+        range: [0, 1000]
+        scale: 2
+      - type: random
+        name: g_amount
+        fields: [amount]
+        generator: decimal
+        range: [0, 1000]
+        scale: 2
+      - type: random
+        name: g_open_date
+        fields: [open_date]
+        generator: date
+        range: ["2026-01-01", "2026-12-31"]
+      - type: sequence
+        name: g_tenant_id
+        fields: [tenant_id]
+        start: 1
+        format: "tenant_id_{seq:06d}"
+      - type: random
+        name: g_branch_code
+        fields: [branch_code]
+        generator: string
+        range: [6, 16]

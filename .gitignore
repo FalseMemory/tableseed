@@ -29,3 +29,7 @@ output/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 本地测试用临时实例数据
+.tmp/
+*.tmp

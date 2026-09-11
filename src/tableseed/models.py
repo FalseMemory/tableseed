@@ -109,6 +109,9 @@ class TableSpec(_Model):
     groups: list[GroupSpec]
     columns: list[ColumnSpec] | None = None
     scope: Scope = "per_parent"
+
+    #: 行数上限；当该表没有任何有限取值组时，它同时是**行数来源**
+    #: （纯随机表：字段全由 random / sequence / derive 组提供）
     rows: int | None = None
 
 

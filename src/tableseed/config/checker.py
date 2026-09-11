@@ -134,12 +134,12 @@ def _check_table(
         if group.type == "aggregate":
             problems.extend(_check_aggregate(config, table, group, group_path))
 
-    if not finite_groups(table) and not has_parent:
+    if not finite_groups(table) and not has_parent and not table.rows:
         problems.append(
             f"{path}: 没有任何有限取值组，无法通过笛卡尔积确定行数"
-            "（请至少提供一个 enum / boundary / dict 组）"
+            "（请至少提供一个 enum / boundary / dict 组，或用 rows 声明行数）"
         )
-        # 有父表的表行数由父表决定，可以完全没有有限组
+        # 有父表的表行数由父表决定；声明了 rows 的表按声明行数生成
 
     return problems
 
