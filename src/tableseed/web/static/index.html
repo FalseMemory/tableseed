@@ -101,12 +101,26 @@
   }
   .row [data-gi] { min-width: 0; }
 
-  /* ---- 数据库连接卡片 ---- */
-  .db-card {
-    background: var(--panel); border: 1px solid var(--line); border-radius: 9px;
-    padding: 12px 14px; margin-bottom: 12px;
+  /* ---- 数据库连接（左栏顶部，全局共用） ---- */
+  .db-panel { border-bottom: 1px solid var(--line); flex: none; background: var(--panel); }
+  .db-head {
+    display: flex; align-items: center; gap: 8px; padding: 9px 16px; cursor: pointer;
+    font-size: 12.5px;
   }
-  .db-card .row:last-child { margin-bottom: 0; }
+  .db-head:hover { background: rgba(255,255,255,.02); }
+  .db-head .title { color: var(--muted); }
+  .db-head .caret { color: var(--muted); font-size: 10px; width: 10px; }
+  .db-head button { padding: 4px 10px; font-size: 12px; }
+  .db-body { padding: 4px 16px 12px; }
+  .db-body[hidden] { display: none; }
+  .db-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .db-grid input, .db-grid select { width: 100%; padding: 6px 9px; font-size: 12.5px; }
+  .db-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .db-foot button { padding: 4px 10px; font-size: 12px; }
+  .db-msg { margin-top: 8px; font-size: 12px; border-radius: 7px; padding: 7px 10px; border: 1px solid; }
+  .db-msg.ok { color: var(--ok); border-color: rgba(63,185,80,.35); background: rgba(63,185,80,.08); }
+  .db-msg.err { color: var(--err); border-color: rgba(248,81,73,.35); background: rgba(248,81,73,.08); }
+  .db-msg ul { margin: 4px 0 0; padding-left: 16px; }
   textarea.sqlbox {
     width: 100%; height: 110px; background: var(--panel); border: 1px solid var(--line);
     border-radius: 8px; padding: 10px 12px; color: var(--text); font-family: var(--mono); font-size: 13px; resize: vertical;
@@ -150,6 +164,41 @@
       <span class="spacer"></span>
       <span class="chip" id="write-chip">只读查询</span>
     </div>
+
+    <!-- 数据库连接：全局共用（SQL 台、造数入库、建表语句都走这里） -->
+    <div class="db-panel">
+      <div class="db-head" id="db-toggle">
+        <span class="caret" id="db-caret">▾</span>
+        <span class="title">数据库连接</span>
+        <span class="chip" id="db-state">未配置</span>
+        <span class="spacer"></span>
+        <button id="btn-db-test">测试连接</button>
+        <button id="btn-db-save">保存到配置</button>
+      </div>
+      <div class="db-body" id="db-body">
+        <div class="db-grid">
+          <select id="db-type">
+            <option value="mysql">MySQL</option>
+            <option value="postgresql">PostgreSQL</option>
+            <option value="oracle">Oracle</option>
+          </select>
+          <input type="text" id="db-host" placeholder="地址" value="127.0.0.1">
+          <input type="number" id="db-port" placeholder="端口">
+          <input type="text" id="db-user" placeholder="用户名">
+          <input type="password" id="db-password" placeholder="密码">
+          <input type="text" id="db-name" placeholder="数据库名">
+          <input type="text" id="db-password-env" placeholder="密码环境变量名（推荐）">
+          <input type="text" id="db-charset" placeholder="字符集 utf8mb4">
+        </div>
+        <div class="db-msg" id="db-msg" hidden></div>
+        <div class="db-foot">
+          <span class="hint" id="db-masked"></span>
+          <span class="spacer"></span>
+          <button id="btn-db-load">读取配置</button>
+        </div>
+      </div>
+    </div>
+
     <textarea id="yaml" spellcheck="false"></textarea>
     <div class="actions">
       <button class="primary" id="btn-gen">生成数据</button>
@@ -208,39 +257,10 @@
     </div>
 
     <div class="tab-body" id="tab-sql" hidden>
-      <div class="db-card">
-        <div class="row" style="margin-bottom:8px">
-          <span class="hint" style="font-weight:500">数据库连接</span>
-          <span class="spacer"></span>
-          <span class="chip" id="db-state">未配置</span>
-          <button id="btn-db-load">读取配置</button>
-          <button id="btn-db-save">保存到配置</button>
-        </div>
-        <div class="row" style="margin-bottom:8px">
-          <select id="db-type" style="width:132px">
-            <option value="mysql">MySQL</option>
-            <option value="postgresql">PostgreSQL</option>
-            <option value="oracle">Oracle</option>
-          </select>
-          <input type="text" id="db-host" placeholder="地址" value="127.0.0.1" style="width:150px">
-          <input type="number" id="db-port" placeholder="端口" style="width:88px">
-          <input type="text" id="db-user" placeholder="用户名" style="width:120px">
-          <input type="password" id="db-password" placeholder="密码" style="width:130px">
-          <input type="text" id="db-name" placeholder="数据库名" style="flex:1;min-width:110px">
-        </div>
-        <div class="row" style="margin-bottom:8px">
-          <input type="text" id="db-charset" placeholder="字符集（MySQL，默认 utf8mb4）" style="width:220px">
-          <input type="text" id="db-password-env" placeholder="或密码环境变量名（推荐）" style="width:240px">
-          <span class="hint">💡 用环境变量存密码，配置文件可安全入库</span>
-        </div>
-        <div class="row" style="margin-bottom:0">
-          <span class="hint" id="db-masked"></span>
-        </div>
-      </div>
-
-      <div class="row" style="margin:12px 0 10px">
-        <input type="text" id="sql-table" placeholder="表名（用于获取建表语句 / 生成 INSERT）" style="width:280px">
+      <div class="row" style="margin-bottom:10px">
+        <input type="text" id="sql-table" placeholder="表名（用于获取建表语句 / 生成 INSERT）" style="width:300px">
         <button id="btn-sql-ddl">获取建表语句</button>
+        <span class="hint">连接信息在左栏顶部，全局共用</span>
       </div>
       <textarea class="sqlbox" id="sql-text" spellcheck="false">SELECT 1</textarea>
       <div class="row" style="margin-top:10px">
@@ -303,6 +323,7 @@ function tableHtml(columns, rows) {
 // ---------------------------------------------------------------- 初始化
 
 async function boot() {
+  loadDatabase();   // 先把配置里的连接信息回填到表单
   try {
     const cfg = await api("/api/config");
     $("yaml").value = cfg.text;
@@ -807,6 +828,41 @@ function dbStatus(text, kind) {
   el.className = "chip" + (kind ? " " + kind : "");
 }
 
+function dbMessage(kind, text) {
+  const el = $("db-msg");
+  if (!kind) { el.hidden = true; el.innerHTML = ""; return; }
+  el.className = "db-msg " + kind;
+  el.innerHTML = escapeHtml(text);
+  el.hidden = false;
+}
+
+async function testDatabase() {
+  if (!dbReady()) {
+    dbMessage("err", "地址、用户名、数据库名为必填");
+    dbStatus("信息不完整");
+    return;
+  }
+  dbMessage(null);
+  dbStatus("测试连接中…");
+  try {
+    const res = await api("/api/database/test", {
+      method: "POST",
+      body: JSON.stringify(dbForm()),
+    });
+    if (res.ok) {
+      dbMessage("ok", `${res.message}（${res.elapsed_ms} ms）`);
+      dbStatus("连接正常", "on");
+    } else {
+      dbMessage("err", res.message);
+      dbStatus("连接失败");
+    }
+    if (res.masked) $("db-masked").textContent = res.masked;
+  } catch (e) {
+    dbMessage("err", e.message);
+    dbStatus("测试失败");
+  }
+}
+
 async function loadDatabase() {
   try {
     const d = await api("/api/database");
@@ -819,11 +875,12 @@ async function loadDatabase() {
     $("db-password-env").value = d.password_env || "";
     $("db-name").value = d.database || "";
     $("db-charset").value = d.charset || "";
-    $("db-masked").textContent = d.masked ? "已读取：" + d.masked : "";
+    $("db-masked").textContent = d.masked || "";
     if (d.env_problem) {
-      $("db-masked").textContent = "⚠ " + d.env_problem;
+      dbMessage("err", d.env_problem);
       dbStatus("密码环境变量未就绪");
     } else {
+      dbMessage(null);
       dbStatus("已从配置读取", "on");
     }
   } catch (e) {
@@ -833,20 +890,20 @@ async function loadDatabase() {
 
 async function saveDatabase() {
   const f = dbForm();
-  if (!f.host && !f.database) {
-    // 全空 = 清除 database 段
-  } else if (!dbReady()) {
-    $("db-masked").textContent = "地址 / 用户名 / 数据库名为必填";
+  const empty = !f.host && !f.user && !f.database;
+  if (!empty && !dbReady()) {
+    dbMessage("err", "地址、用户名、数据库名为必填（或全部留空以清除配置）");
     return;
   }
   try {
     const res = await api("/api/database", { method: "PUT", body: JSON.stringify(f) });
     $("yaml").value = res.text;           // 左栏同步（含 database 段）
-    $("db-masked").textContent = "已保存：" + res.masked;
+    $("db-masked").textContent = res.masked;
+    dbMessage("ok", `已保存${res.saved ? "到 " + res.path : "（仅内存）"}`);
     dbStatus(res.saved ? "已保存到 " + res.path : "已保存（仅内存）", "on");
     await validate(true);
   } catch (e) {
-    $("db-masked").textContent = "保存失败：" + e.message;
+    dbMessage("err", e.message);
   }
 }
 
@@ -944,15 +1001,19 @@ $("btn-sql-ddl").addEventListener("click", fetchDDL);
 $("btn-editor-save").addEventListener("click", saveEditor);
 $("btn-db-load").addEventListener("click", loadDatabase);
 $("btn-db-save").addEventListener("click", saveDatabase);
+$("btn-db-test").addEventListener("click", testDatabase);
+
+// 折叠 / 展开数据库连接面板（点面板上的按钮不触发）
+$("db-toggle").addEventListener("click", (e) => {
+  if (e.target.closest("button")) return;
+  const body = $("db-body");
+  body.hidden = !body.hidden;
+  $("db-caret").textContent = body.hidden ? "▸" : "▾";
+});
 
 // 切换类型时自动带出该类型的默认端口
 $("db-type").addEventListener("change", (e) => {
   if (!$("db-port").value) $("db-port").value = DB_DEFAULT_PORT[e.target.value] || "";
-});
-
-// 预演 / 生成 / 关系图依赖左栏文本；切到 SQL 台时把配置里的连接读进来
-document.querySelectorAll('.tabs button[data-tab="sql"]').forEach((b) => {
-  b.addEventListener("click", () => { if (!$("db-host").value) loadDatabase(); });
 });
 
 boot();

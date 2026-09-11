@@ -152,6 +152,13 @@ def create_app(config_path: str | None = None) -> FastAPI:
     state = AppState(config_path)
     app.state.tableseed = state
 
+    # 统一把领域异常转成 400 —— 漏掉一处就是 500，前端只看到 Internal Server Error，
+    # 完全看不出「表不存在」这类真正原因
+    @app.exception_handler(TableSeedError)
+    async def _domain_error_handler(_request, exc: TableSeedError):
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
     # ---------------------------------------------------------------- 页面
 
     @app.get("/", response_class=HTMLResponse)
@@ -363,6 +370,60 @@ def create_app(config_path: str | None = None) -> FastAPI:
             "path": state.config_path,
             "masked": config.database.describe() if config.database else "未配置",
         }
+
+    @app.post("/api/database/test")
+    def test_database(payload: DatabasePayload) -> dict[str, Any]:
+        """试连一次，让用户知道连接信息填得对不对。
+
+        失败也返回 200 + ``ok=false``：这是**检查结果**而非请求错误，
+        前端按结果渲染成红/绿提示，不该走异常分支。
+        """
+        import time as _time  # noqa: PLC0415
+
+        from ..models import DatabaseSpec  # noqa: PLC0415
+
+        try:
+            spec = DatabaseSpec.model_validate(payload.model_dump(exclude_none=True))
+        except Exception as exc:
+            return {"ok": False, "message": f"连接信息不完整或有误：{exc}"}
+
+        problem = spec.env_problem()
+        if problem:
+            return {"ok": False, "message": problem}
+
+        url = spec.resolved_url()
+        if not url:
+            return {"ok": False, "message": "连接信息不完整：地址、用户名、数据库名为必填"}
+
+        try:
+            from sqlalchemy import create_engine, text  # noqa: PLC0415
+        except ImportError:
+            return {"ok": False, "message": "未安装 SQLAlchemy/pymysql，无法测试连接"}
+
+        engine = create_engine(url, future=True)
+        started = _time.perf_counter()
+        try:
+            with engine.connect() as conn:
+                version = conn.execute(text("SELECT VERSION()")).scalar()
+                tables = _safe_table_names(conn)
+            return {
+                "ok": True,
+                "message": f"连接成功 · {version}"
+                + (f" · 库中 {len(tables)} 张表" if tables is not None else ""),
+                "version": str(version),
+                "tables": tables or [],
+                "masked": spec.describe(),
+                "elapsed_ms": int((_time.perf_counter() - started) * 1000),
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "message": f"连接失败：{_short_db_error(exc)}",
+                "masked": spec.describe(),
+                "elapsed_ms": int((_time.perf_counter() - started) * 1000),
+            }
+        finally:
+            engine.dispose()
 
     # ---------------------------------------------------------------- 生成
 
@@ -653,6 +714,32 @@ def _current_config(state: AppState) -> SeedConfig | None:
         return None
 
 
+def _safe_table_names(conn) -> list[str] | None:
+    """尽力取表名列表；取不到不算错（某些账号无权限看元数据）。"""
+    try:
+        from sqlalchemy import inspect  # noqa: PLC0415
+
+        return sorted(inspect(conn).get_table_names())
+    except Exception:  # pragma: no cover
+        return None
+
+
+def _short_db_error(exc: Exception) -> str:
+    """把驱动抛的长错误压成一句人话 —— 用户要的是「密码错」而不是堆栈。"""
+    text = str(exc)
+    if "Access denied" in text:
+        return "用户名或密码不正确（Access denied）"
+    if "Unknown database" in text or "1049" in text:
+        return "数据库不存在（Unknown database）"
+    if "Can't connect" in text or "2003" in text:
+        return "连不上服务器 —— 检查地址、端口，以及数据库服务是否已启动"
+    if "timed out" in text.lower():
+        return "连接超时 —— 检查地址与网络"
+    if "No module named" in text:
+        return text
+    return text.splitlines()[0][:200]
+
+
 def _reflect_ddl(url: str, table: str) -> str:
     """反射表结构并生成 CREATE TABLE 语句。
 
@@ -662,7 +749,6 @@ def _reflect_ddl(url: str, table: str) -> str:
     try:
         from sqlalchemy import MetaData, create_engine  # noqa: PLC0415
         from sqlalchemy.schema import CreateTable  # noqa: PLC0415
-        from sqlalchemy.dialects import registry as _dialect_registry  # noqa: PLC0415,F401
     except ImportError as exc:  # pragma: no cover
         raise TableSeedError("未安装 SQLAlchemy，无法反射建表语句") from exc
 
@@ -671,17 +757,30 @@ def _reflect_ddl(url: str, table: str) -> str:
     engine = create_engine(url, future=True)
     try:
         metadata = MetaData()
-        metadata.reflect(bind=engine, only=[table])
+        try:
+            metadata.reflect(bind=engine, only=[table])
+        except Exception as exc:
+            # reflect 失败 ≠ 连接失败 —— 大概率是表不存在，先查清楚再定性
+            from sqlalchemy import inspect  # noqa: PLC0415
+
+            try:
+                available = inspect(engine).get_table_names()
+            except Exception:
+                raise SinkError(f"连接数据库失败: {exc}") from exc
+
+            if table in available:
+                raise SinkError(f"表 {table} 存在但反射失败: {exc}") from exc
+            hint = f"库中现有表: {', '.join(available[:20])}" if available else "库中没有任何表"
+            raise SinkError(f"数据库中不存在表 {table}（{hint}）") from exc
+
         if table not in metadata.tables:
-            raise SinkError(f"数据库中不存在表 {table}")
-        ddl = str(
-            CreateTable(metadata.tables[table]).compile(engine)
-        ).strip() + ";"
-        return ddl
-    except TableSeedError:
-        raise
-    except Exception as exc:
-        raise SinkError(f"反射表 {table} 失败: {exc}") from exc
+            from sqlalchemy import inspect  # noqa: PLC0415
+
+            available = inspect(engine).get_table_names()
+            hint = f"库中现有表: {', '.join(available[:20])}" if available else "库中没有任何表"
+            raise SinkError(f"数据库中不存在表 {table}（{hint}）")
+
+        return str(CreateTable(metadata.tables[table]).compile(engine)).strip() + ";"
     finally:
         engine.dispose()
 
