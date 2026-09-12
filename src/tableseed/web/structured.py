@@ -17,7 +17,9 @@ from typing import Any
 
 import yaml as _pyyaml
 
+from pydantic import ValidationError
 from ..errors import ConfigError
+from ..errors_cn import explain_validation
 from ..models import SeedConfig
 
 __all__ = ["to_edit_view", "from_edit_view"]
@@ -121,7 +123,9 @@ def from_edit_view(data: dict[str, Any]) -> str:
 
     try:
         config = SeedConfig.model_validate(payload)
-    except Exception as exc:  # pydantic ValidationError
+    except ValidationError as exc:
+        raise ConfigError(explain_validation(exc)) from exc
+    except Exception as exc:
         raise ConfigError(f"编辑后的配置不合法: {exc}") from exc
 
     return dump_config_yaml(config)

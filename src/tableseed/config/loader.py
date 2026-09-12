@@ -8,6 +8,7 @@ import yaml
 from pydantic import ValidationError
 
 from ..errors import ConfigError
+from ..errors_cn import explain_validation, explain_yaml_error
 from ..models import SeedConfig
 
 
@@ -28,7 +29,7 @@ def load_config_from_text(text: str, source: str = "<inline>") -> SeedConfig:
     try:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise ConfigError(f"YAML 解析失败: {exc}", source) from exc
+        raise ConfigError(explain_yaml_error(exc), source) from exc
 
     if raw is None:
         raise ConfigError("配置内容为空", source)
@@ -38,13 +39,4 @@ def load_config_from_text(text: str, source: str = "<inline>") -> SeedConfig:
     try:
         return SeedConfig.model_validate(raw)
     except ValidationError as exc:
-        raise ConfigError(_format_validation_error(exc), source) from exc
-
-
-def _format_validation_error(exc: ValidationError) -> str:
-    """把 pydantic 的报错转成一行一条、带字段路径的可读信息。"""
-    lines = []
-    for error in exc.errors():
-        location = ".".join(str(part) for part in error["loc"]) or "<root>"
-        lines.append(f"{location}: {error['msg']}")
-    return "配置校验失败：\n  - " + "\n  - ".join(lines)
+        raise ConfigError(explain_validation(exc), source) from exc

@@ -157,11 +157,11 @@ def test_edit_view_has_no_cross_type_defaults():
     assert status_group["values"] == [["01"], ["02"]]
 
 
-@allure.story("编辑后的非法配置当场报错")
+@allure.story("编辑后的非法配置当场报错（中文提示）")
 def test_invalid_edit_is_rejected():
     view = to_edit_view(service.load_text(full_config()))
     view["tables"][0]["groups"][0]["fields"] = []          # 组没有字段
-    with pytest.raises(ConfigError, match="不合法"):
+    with pytest.raises(ConfigError, match="缺少必填字段"):
         from_edit_view(view)
 
 
