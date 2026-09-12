@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
 
 from .. import service
@@ -23,6 +23,9 @@ from ..errors import TableSeedError
 from ..errors_cn import explain_validation
 from ..models import DatabaseSpec, SeedConfig
 from .security import SqlRejected, validate_readonly
+
+#: 服务启动时刻（页面显示，用于确认浏览器拿到的是新前端）
+_APP_STARTED_AT = time.strftime("%Y-%m-%d %H:%M:%S")
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -250,27 +253,43 @@ def create_app(config_path: str | None = None) -> FastAPI:
     # ---------------------------------------------------------------- 页面
 
     @app.get("/", response_class=HTMLResponse)
-    def index() -> HTMLResponse:
+    def index(v: str | None = None) -> Response:
+        """WebUI 单页。
+
+        根路径会**重定向到带版本号的地址**（``/?v=<服务启动时刻>``）：
+        浏览器缓存里若留着旧版 index.html，普通刷新可能继续用旧的 ——
+        换个 URL 就是换一个缓存条目，必定回源拿到新前端。
+        """
+        if not v:
+            stamp = _APP_STARTED_AT.replace(" ", "").replace(":", "").replace("-", "")
+            return RedirectResponse(url=f"/?v={stamp}", status_code=307)
         html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
         return HTMLResponse(html)
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
-        return {"ok": True, "config_path": state.config_path}
+        return {
+            "ok": True,
+            "config_path": state.config_path,
+            #: 服务启动时刻 —— 页面右下角显示，用来确认"浏览器拿到的是不是新前端"
+            "started_at": _APP_STARTED_AT,
+        }
 
     # ---------------------------------------------------------------- 配置
 
     @app.middleware("http")
     async def _no_store(request, call_next):
-        """数据类接口一律不缓存。
+        """**所有**响应都禁止缓存 —— 不只是 /api。
 
-        浏览器曾把「服务刚启动、还没存任何连接」那次的空响应缓存下来，
-        之后刷新页面一直拿到空列表 —— 用户看到的就是"保存的东西刷新后没了"。
+        两个坑，缺一不可：
+        1. /api 的空响应被缓存 → 刷新后连接列表变空（数据其实还在文件里）；
+        2. **index.html 本身被缓存** → 修好的前端代码根本到不了浏览器，
+           用户刷新拿到的还是旧的 api()（没有 no-store），于是修复"无效"。
         """
         response = await call_next(request)
-        if request.url.path.startswith("/api"):
-            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-            response.headers["Pragma"] = "no-cache"
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
         return response
 
     @app.get("/api/config")

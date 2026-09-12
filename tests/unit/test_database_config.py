@@ -355,6 +355,30 @@ def test_switch_incomplete_connection_rejected(tmp_path, monkeypatch):
     assert client.get("/api/connections").json()["active"] == "ok"
 
 
+@allure.story("页面本身也不能被缓存（否则修好的前端到不了浏览器）")
+def test_html_is_not_cacheable(tmp_path, monkeypatch):
+    """回归：只给 /api 加 no-store 不够 —— index.html 被缓存时，
+    浏览器刷新拿到的还是旧前端（旧 api() 没禁缓存），修复看起来"没生效"。
+    """
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(create_app())
+
+    res = client.get("/")
+    cache = res.headers.get("cache-control", "")
+    assert "no-store" in cache, f"HTML 缺少 no-store: {cache}"
+    # HTML 里也要有防缓存 meta（双保险）
+    assert 'http-equiv="Cache-Control"' in res.text
+
+    # 根路径重定向到带版本号的地址 —— 绕开浏览器里残留的旧页面缓存
+    raw = client.get("/", follow_redirects=False)
+    assert raw.status_code in (307, 302)
+    assert "v=" in raw.headers["location"]
+    assert client.get(raw.headers["location"]).status_code == 200
+
+    health = client.get("/api/health").json()
+    assert health.get("started_at"), "health 应返回服务启动时间（用于确认前端新旧）"
+
+
 @allure.story("数据接口禁止浏览器缓存（曾导致刷新后连接列表变空）")
 def test_api_responses_are_not_cacheable(tmp_path, monkeypatch):
     """回归：浏览器缓存了「服务刚启动还没存连接」的空响应，刷新后一直拿到空列表，

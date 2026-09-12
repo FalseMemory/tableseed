@@ -3,6 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- 页面本身也不缓存 —— 曾经浏览器拿着旧的前端代码，
+     修好的逻辑（禁缓存 / 时间戳）根本到不了浏览器 -->
+<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
 <title>tableseed · 多表联合造数</title>
 <style>
   /* ============================================================
@@ -318,6 +323,7 @@
   <h1>tableseed</h1>
   <span class="tag">多表联合造数 · 字段分组 × 表间关系</span>
   <span class="spacer"></span>
+  <span class="hint" id="app-version" style="font-size:11px;color:var(--muted);opacity:.75"></span>
   <span id="status">就绪</span>
 </header>
 
@@ -560,6 +566,11 @@ async function boot() {
   loadDatabase();   // 先把配置里的连接信息回填到表单
   loadWorkspace();  // 配置文件清单（多文件切换）
   try {
+    // 显示服务启动时间 —— 用来确认浏览器里跑的是不是刚重启后的新前端
+    try {
+      const health = await api("/api/health");
+      if (health.started_at) $("app-version").textContent = `前端/服务启动于 ${health.started_at}`;
+    } catch (e) { /* 非关键 */ }
     const cfg = await api("/api/config");
     $("yaml").value = cfg.text;
     $("cfg-path").textContent = cfg.path || "未绑定文件（仅内存）";
