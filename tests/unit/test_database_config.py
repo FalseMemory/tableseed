@@ -355,6 +355,27 @@ def test_switch_incomplete_connection_rejected(tmp_path, monkeypatch):
     assert client.get("/api/connections").json()["active"] == "ok"
 
 
+@allure.story("数据接口禁止浏览器缓存（曾导致刷新后连接列表变空）")
+def test_api_responses_are_not_cacheable(tmp_path, monkeypatch):
+    """回归：浏览器缓存了「服务刚启动还没存连接」的空响应，刷新后一直拿到空列表，
+    看起来像"保存的东西没了"。所有 /api 响应必须带 no-store。
+    """
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(create_app())
+
+    res = client.get("/api/connections")
+    cache = res.headers.get("cache-control", "")
+    assert "no-store" in cache, f"缺少 no-store: {cache}"
+
+    # 连续两次请求（同一 URL）必须都回源，不能被缓存成同一份
+    first = client.get("/api/connections")
+    client.put("/api/connections", json={"name": "x", "type": "mysql", "host": "h",
+                                         "user": "u", "database": "d"})
+    second = client.get("/api/connections")
+    assert first.json()["connections"] == {}
+    assert "x" in second.json()["connections"]
+
+
 @allure.story("接口回显带 complete / incomplete / active_missing")
 def test_connections_response_shape(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)

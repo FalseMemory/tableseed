@@ -260,6 +260,19 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     # ---------------------------------------------------------------- 配置
 
+    @app.middleware("http")
+    async def _no_store(request, call_next):
+        """数据类接口一律不缓存。
+
+        浏览器曾把「服务刚启动、还没存任何连接」那次的空响应缓存下来，
+        之后刷新页面一直拿到空列表 —— 用户看到的就是"保存的东西刷新后没了"。
+        """
+        response = await call_next(request)
+        if request.url.path.startswith("/api"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
     @app.get("/api/config")
     def get_config() -> dict[str, Any]:
         return {"text": state.text, "path": state.config_path}
@@ -489,6 +502,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
             "incomplete": data["incomplete"],
             "active_missing": data["active_missing"],
             "has_usable": data["has_usable"],
+            "path": str(Path(ConnectionsStore().path).resolve()),
         }
 
     @app.put("/api/connections")

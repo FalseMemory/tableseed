@@ -371,6 +371,7 @@
         </div>
         <div class="db-msg" id="db-msg" hidden></div>
         <div class="db-foot">
+          <span class="hint" id="db-config-path" title="连接信息的存放文件（config.ini）"></span>
           <span class="hint" id="db-masked"></span>
           <span class="spacer"></span>
           <button id="btn-db-delete">删除</button>
@@ -503,8 +504,15 @@ const $ = (id) => document.getElementById(id);
 const state = { result: null, dsn: null };
 
 async function api(path, options = {}) {
-  const res = await fetch(path, {
+  const method = (options.method || (options.body ? "POST" : "GET")).toUpperCase();
+  // 数据类接口一律不缓存 —— 曾经浏览器把「服务刚启动还没有连接」那次的
+  // 空响应缓存下来，之后刷新页面一直拿到空列表，看起来像"保存的东西没了"
+  const url = method === "GET"
+    ? path + (path.includes("?") ? "&" : "?") + "_t=" + Date.now()
+    : path;
+  const res = await fetch(url, {
     headers: { "Content-Type": "application/json" },
+    cache: "no-store",
     ...options,
   });
   const text = await res.text();
@@ -1320,7 +1328,6 @@ async function loadDatabase() {
       applyConnection(d.active);   // 首次打开自动回填激活连接的表单，不用再手动切一次
       dbStatus(`${names.length} 个连接，当前：${d.active}`, "on");
     } else if (d.active_missing) {
-      // 当前连接指向一个已经不在清单里的连接：说清楚，别静默
       dbStatus(`当前连接 ${d.active} 已不存在`, "err");
       dbMessage("err", `配置文件里记录当前连接为「${d.active}」，但它已不在清单中。`
         + `请在下拉里重新选择一个连接（或补回该连接段）。`);
@@ -1329,6 +1336,11 @@ async function loadDatabase() {
       dbStatus("未选择连接");
     } else {
       dbStatus("未配置（可在 config.ini 保存多个连接）");
+    }
+    // 明确显示读取的是哪个文件 —— cwd 不对时一眼能看出，不用猜
+    if (d.path) {
+      $("db-config-path").textContent = `配置文件 ${d.path}`;
+      $("db-config-path").title = `连接信息存于：${d.path}（与 YAML 配置分离）`;
     }
   } catch (e) {
     dbStatus("读取失败");
