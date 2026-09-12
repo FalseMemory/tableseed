@@ -73,12 +73,23 @@ _SPEC_FIELDS = ("type", "host", "port", "user", "password", "password_env",
 
 
 class ConnectionsStore:
-    """config.ini 的读写封装。所有写操作都先落临时文件再原子替换。"""
+    """config.ini 的读写封装。
+
+    写操作一律「读原始文件 → 只改目标段 → 原子替换」：
+    曾经用「load() 的解析结果整份重写」，而 load() 会过滤掉不完整的连接段，
+    于是**任何一次保存都会把不完整连接段和其他段静默删掉**。
+    现在保留文件里的所有段，只动该动的那一段。
+    """
 
     def __init__(self, path: Path | None = None) -> None:
         self.path = path or connections_path
 
     # ---------------------------------------------------------------- 读
+
+    def _parser(self) -> configparser.ConfigParser:
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.read(self.path, encoding="utf-8")
+        return parser
 
     def load(self) -> dict[str, Any]:
         """读取全部连接与当前激活名。文件不存在视为空。
@@ -86,9 +97,11 @@ class ConnectionsStore:
         ``interpolation=None`` 必须显式关掉 —— 默认的 BasicInterpolation 会把
         值里的 ``%`` 当插值语法，密码带 ``%`` 时读写直接抛异常（这是
         "连接含特殊字符无法保存/加载"的根因）。
+
+        **不完整连接也会返回**（``complete: False``）—— 静默丢弃会让用户在
+        页面上"找不到自己刚存的连接"，且下次写回时真的删掉它。
         """
-        parser = configparser.ConfigParser(interpolation=None)
-        parser.read(self.path, encoding="utf-8")
+        parser = self._parser()
 
         active = None
         connections: dict[str, dict[str, Any]] = {}
@@ -97,16 +110,31 @@ class ConnectionsStore:
             if section == _GENERAL:
                 active = parser[section].get(_ACTIVE_KEY) or None
                 continue
+            if section == _WORKSPACE:
+                continue  # 工作区段不是连接
             fields: dict[str, Any] = {}
             for key in _SPEC_FIELDS:
                 value = parser[section].get(key)
                 if value is None or value == "":
                     continue
                 fields[key] = int(value) if key == "port" else value
-            if fields.get("host") or fields.get("url"):
-                connections[section] = fields
+            # 字段 dict 保持纯净（可直接喂 DatabaseSpec），
+            # 「信息是否完整」另用 names 列表表达
+            connections[section] = fields
 
-        return {"active": active, "connections": connections}
+        #: 缺 host / url 的连接名 —— 连不上库，页面上要标出来
+        incomplete = [
+            n for n, f in connections.items() if not (f.get("host") or f.get("url"))
+        ]
+        usable = [n for n in connections if n not in incomplete]
+        return {
+            "active": active,
+            "connections": connections,
+            "incomplete": incomplete,
+            #: active 指向一个不存在（已删）的连接 —— 前端要提示
+            "active_missing": bool(active) and active not in connections,
+            "has_usable": bool(usable),
+        }
 
     def get(self, name: str) -> dict[str, Any] | None:
         return self.load()["connections"].get(name)
@@ -115,14 +143,19 @@ class ConnectionsStore:
         return self.load()["active"]
 
     def active_spec(self) -> DatabaseSpec | None:
-        """当前激活连接的 DatabaseSpec；没有激活连接返回 None。"""
+        """当前激活连接的 DatabaseSpec；没有可用连接返回 None。
+
+        active 指向已删除的连接时回落到第一个**信息完整**的连接 ——
+        页面不至于因为一条坏数据整个连不上库。
+        """
         data = self.load()
+        incomplete = set(data["incomplete"])
         name = data["active"]
-        if name and name in data["connections"]:
+        if name and name in data["connections"] and name not in incomplete:
             return DatabaseSpec.model_validate(data["connections"][name])
-        # 未显式激活时回落到第一个连接（保持"开箱可用"）
-        for fields in data["connections"].values():
-            return DatabaseSpec.model_validate(fields)
+        for candidate_name, fields in data["connections"].items():
+            if candidate_name not in incomplete:
+                return DatabaseSpec.model_validate(fields)
         return None
 
     # ---------------------------------------------------------------- 写
@@ -145,27 +178,45 @@ class ConnectionsStore:
         if not cleaned.get("host") and not cleaned.get("url"):
             raise TableSeedError("至少要填写 host（或直接给 url）")
 
-        data = self.load()
-        data["connections"][name] = cleaned
-        if not data["active"]:
-            data["active"] = name  # 第一个连接自动成为当前连接
-        self._write(data)
+        parser = self._parser()
+        if parser.has_section(name):
+            parser.remove_section(name)   # 整体替换该段，避免残留旧键
+        parser[name] = {k: str(v) for k, v in cleaned.items()}
+
+        if not parser.has_section(_GENERAL):
+            parser[_GENERAL] = {}
+        if not (parser[_GENERAL].get(_ACTIVE_KEY) or "").strip():
+            parser[_GENERAL][_ACTIVE_KEY] = name   # 第一个连接自动成为当前连接
+
+        self._atomic_write(parser)
 
     def delete(self, name: str) -> None:
-        data = self.load()
-        if name not in data["connections"]:
+        parser = self._parser()
+        if not parser.has_section(name):
             return
-        del data["connections"][name]
-        if data["active"] == name:
-            data["active"] = next(iter(data["connections"]), None)
-        self._write(data)
+        parser.remove_section(name)
+        current = parser[_GENERAL].get(_ACTIVE_KEY) if parser.has_section(_GENERAL) else None
+        if (current or "") == name:
+            remaining = [s for s in parser.sections() if s not in (_GENERAL, _WORKSPACE)]
+            parser[_GENERAL][_ACTIVE_KEY] = remaining[0] if remaining else ""
+        self._atomic_write(parser)
 
     def set_active(self, name: str) -> None:
-        data = self.load()
-        if name not in data["connections"]:
-            raise TableSeedError(f"连接 {name!r} 不存在")
-        data["active"] = name
-        self._write(data)
+        parser = self._parser()
+        if not parser.has_section(name):
+            raise TableSeedError(f"连接 {name!r} 不存在（可能已被删除）")
+        if not parser.has_section(_GENERAL):
+            parser[_GENERAL] = {}
+        parser[_GENERAL][_ACTIVE_KEY] = name
+        self._atomic_write(parser)
+
+    def _atomic_write(self, parser: configparser.ConfigParser) -> None:
+        """写临时文件再替换 —— 写一半被杀也不会留下坏文件。"""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            parser.write(f)
+        tmp.replace(self.path)
 
     # ---------------------------------------------------------------- 工作区（配置文件清单）
 
@@ -209,8 +260,7 @@ class ConnectionsStore:
         self._write_workspace(data)
 
     def _write_workspace(self, data: dict[str, Any]) -> None:
-        parser = configparser.ConfigParser(interpolation=None)
-        parser.read(self.path, encoding="utf-8")
+        parser = self._parser()
         if not parser.has_section(_GENERAL):
             parser[_GENERAL] = {}
         if data.get("active") and parser.has_section(_GENERAL):
@@ -219,22 +269,5 @@ class ConnectionsStore:
             _ACTIVE_FILE_KEY: data.get("active") or "",
             _FILES_KEY: "\n".join(data.get("files") or []),
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            parser.write(f)
-        tmp.replace(self.path)
+        self._atomic_write(parser)
 
-    # ---------------------------------------------------------------- 内部
-
-    def _write(self, data: dict[str, Any]) -> None:
-        parser = configparser.ConfigParser(interpolation=None)  # 写侧同理：% 不能当插值语法
-        parser[_GENERAL] = {_ACTIVE_KEY: data["active"] or ""}
-        for name, fields in data["connections"].items():
-            parser[name] = {k: str(v) for k, v in fields.items()}
-
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        with tmp.open("w", encoding="utf-8") as f:
-            parser.write(f)
-        tmp.replace(self.path)  # 原子替换，写一半被杀也不留坏文件

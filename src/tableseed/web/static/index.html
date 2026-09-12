@@ -284,6 +284,10 @@
     color: #ffd479; border-color: rgba(251, 191, 36, .45);
     background: rgba(251, 191, 36, .08);
   }
+  .chip.err {
+    color: var(--err); border-color: rgba(248, 113, 113, .45);
+    background: rgba(248, 113, 113, .09);
+  }
   .bar { height: 5px; background: var(--panel-2); border-radius: 4px; overflow: hidden; margin-bottom: 12px; }
   .bar i { display: block; height: 100%; width: 0; background: var(--accent-grad); transition: width .25s ease; border-radius: 4px; }
 
@@ -1303,14 +1307,28 @@ async function loadDatabase() {
     editConnections = d;
     const select = $("db-conn-select");
     const names = Object.keys(d.connections);
+    const incomplete = new Set(d.incomplete || []);
     select.innerHTML = '<option value="">— 选择已有连接 —</option>'
-      + names.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}${n === d.active ? " ✓" : ""}</option>`).join("");
-    if (d.active) {
+      + names.map((n) => {
+        const mark = n === d.active ? " ✓" : "";
+        const bad = incomplete.has(n) ? "（信息不完整）" : "";
+        return `<option value="${escapeHtml(n)}">${escapeHtml(n)}${bad}${mark}</option>`;
+      }).join("");
+
+    if (d.active && d.connections[d.active]) {
       select.value = d.active;
       applyConnection(d.active);   // 首次打开自动回填激活连接的表单，不用再手动切一次
       dbStatus(`${names.length} 个连接，当前：${d.active}`, "on");
+    } else if (d.active_missing) {
+      // 当前连接指向一个已经不在清单里的连接：说清楚，别静默
+      dbStatus(`当前连接 ${d.active} 已不存在`, "err");
+      dbMessage("err", `配置文件里记录当前连接为「${d.active}」，但它已不在清单中。`
+        + `请在下拉里重新选择一个连接（或补回该连接段）。`);
+      $("db-conn-name").value = "";
+    } else if (names.length) {
+      dbStatus("未选择连接");
     } else {
-      dbStatus(names.length ? "未选择连接" : "未配置（可在 config.ini 保存多个连接）");
+      dbStatus("未配置（可在 config.ini 保存多个连接）");
     }
   } catch (e) {
     dbStatus("读取失败");
@@ -1319,7 +1337,12 @@ async function loadDatabase() {
 
 function applyConnection(name) {
   const conn = (editConnections.connections || {})[name];
-  if (!conn) return;
+  if (!conn) {
+    // 曾经这里是静默 return —— 切换按钮点了毫无反应，看起来就是"切换坏了"
+    dbStatus(`连接 ${name} 不存在`, "err");
+    dbMessage("err", `拿不到连接「${name}」的信息（可能已被删除或改名），请刷新页面或重新选择。`);
+    return;
+  }
   $("db-conn-name").value = name;
   $("db-type").value = conn.type || "mysql";
   $("db-host").value = conn.host || "";
@@ -1330,17 +1353,24 @@ function applyConnection(name) {
   $("db-name").value = conn.database || "";
   $("db-charset").value = conn.charset || "";
   $("db-masked").textContent = conn.masked || "";
-  dbMessage(null);
+  if (conn.complete === false) {
+    dbMessage("err", `连接「${name}」信息不完整（缺数据库地址），补全后保存才能用。`);
+  } else {
+    dbMessage(null);
+  }
   dbStatus(`已切换到 ${name}`, "on");
 }
 
 async function switchConnection(name) {
+  const select = $("db-conn-select");
+  const previous = editConnections.active;   // 失败时回滚用
   try {
     await api("/api/connections/active", { method: "POST", body: JSON.stringify({ name }) });
-    applyConnection(name);
+    await loadDatabase();              // 重新拉取：更新下拉的 ✓ 标记与回填
     setStatus(`当前连接：${name}`);
   } catch (e) {
     dbMessage("err", e.message);
+    if (previous) select.value = previous;   // 没切成，别让下拉骗人
   }
 }
 

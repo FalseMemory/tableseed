@@ -199,8 +199,12 @@ def test_connections_endpoints(tmp_path, monkeypatch):
     assert data["active"] == "demo"
     assert data["connections"]["demo"]["database"] == "tableseed_demo"
     assert "TABLESEED_DB_PASSWORD" in str(data)          # 变量名可见
-    # 回显里不该有明文密码（这个测试没写明文，故验证脱敏键存在）
-    assert "masked" in data["connections"]["demo"]
+    # masked 必须是正常脱敏串 —— 曾经这里 NameError 被宽 except 吞成
+    # 「(配置有误: ...)」，而旧断言只检查键存在，放过了 bug
+    masked = data["connections"]["demo"]["masked"]
+    assert "配置有误" not in masked and "name '" not in masked
+    assert masked.startswith("mysql") and ":***@" in masked          # 密码位已脱敏
+    assert data["connections"]["demo"]["password_source"] == "env:TABLESEED_DB_PASSWORD"
 
     client.post("/api/connections/delete", json={"name": "demo"})
     assert client.get("/api/connections").json()["connections"] == {}
@@ -267,6 +271,101 @@ tables:
     res = client.post("/api/insert", json={})
     assert res.status_code == 400
     assert not res.json()["detail"].startswith("本次预览的数据")
+
+
+# ---------------------------------------------------------------- 连接切换的健壮性（回归）
+
+
+@allure.feature("数据库连接")
+@allure.story("不完整连接不被静默丢弃，且不会因保存别的连接被删掉")
+def test_incomplete_connection_is_kept(tmp_path):
+    """回归：load() 曾过滤掉无 host 的段，而 save() 用 load() 的结果整份重写
+    —— 于是任何一次保存都会把不完整连接段从 config.ini 里静默删掉。"""
+    store = ConnectionsStore(tmp_path / "config.ini")
+    store.save("ok", {"type": "mysql", "host": "127.0.0.1", "user": "root", "database": "d"})
+
+    # 手工写一个缺 host 的连接段（模拟用户改了一半 / 老数据）
+    text = (tmp_path / "config.ini").read_text(encoding="utf-8")
+    (tmp_path / "config.ini").write_text(
+        text + "\n[half]\ntype = mysql\nuser = root\ndatabase = d2\n", encoding="utf-8"
+    )
+
+    data = store.load()
+    assert "half" in data["connections"], "不完整连接必须能读出来"
+    assert "half" in data["incomplete"]
+    assert "ok" not in data["incomplete"]
+
+    # 再保存一个连接 —— half 段必须还在
+    store.save("other", {"type": "mysql", "host": "h2", "user": "root", "database": "d3"})
+    reloaded = store.load()
+    assert {"ok", "half", "other"} <= set(reloaded["connections"])
+    assert "half" in (tmp_path / "config.ini").read_text(encoding="utf-8")
+
+
+@allure.story("保存连接不会破坏 workspace 段")
+def test_save_connection_keeps_workspace(tmp_path):
+    store = ConnectionsStore(tmp_path / "config.ini")
+    store.save("ok", {"type": "mysql", "host": "h", "user": "u", "database": "d"})
+    store.set_active_file("samples/txn.yaml")
+
+    store.save("ok2", {"type": "mysql", "host": "h2", "user": "u", "database": "d2"})
+    assert store.get_workspace()["active"] == "samples/txn.yaml"
+
+
+@allure.story("active 指向已删除的连接：明确报出而不是静默回落")
+def test_active_missing_is_reported(tmp_path):
+    store = ConnectionsStore(tmp_path / "config.ini")
+    store.save("a", {"type": "mysql", "host": "127.0.0.1", "user": "u", "database": "da"})
+    store.save("b", {"type": "mysql", "host": "127.0.0.2", "user": "u", "database": "db"})
+
+    # 手动把 active 指向一个不存在的连接（模拟用户删了段但 active 没更新）
+    text = (tmp_path / "config.ini").read_text(encoding="utf-8").replace("active = a", "active = ghost")
+    (tmp_path / "config.ini").write_text(text, encoding="utf-8")
+
+    data = store.load()
+    assert data["active_missing"] is True
+    # 但仍要能回落到可用连接，不至于整个连不上库
+    assert store.active_spec() is not None
+
+
+@allure.story("切换到不存在的连接：400 且文案说清")
+def test_switch_unknown_connection_message(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(create_app())
+    res = client.post("/api/connections/active", json={"name": "ghost"})
+    assert res.status_code == 400
+    assert "不存在" in res.json()["detail"]
+
+
+@allure.story("切换到信息不完整的连接：拒绝并说明原因")
+def test_switch_incomplete_connection_rejected(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(create_app())
+    client.put("/api/connections", json={"name": "ok", "type": "mysql", "host": "h",
+                                         "user": "u", "database": "d"})
+    # 手工塞一个缺 host 的连接段
+    ini = tmp_path / "config.ini"
+    ini.write_text(ini.read_text(encoding="utf-8")
+                   + "\n[half]\ntype = mysql\nuser = root\ndatabase = d2\n", encoding="utf-8")
+
+    res = client.post("/api/connections/active", json={"name": "half"})
+    assert res.status_code == 400
+    assert "信息不完整" in res.json()["detail"]
+    # 没有真的切过去
+    assert client.get("/api/connections").json()["active"] == "ok"
+
+
+@allure.story("接口回显带 complete / incomplete / active_missing")
+def test_connections_response_shape(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(create_app())
+    client.put("/api/connections", json={"name": "ok", "type": "mysql", "host": "h",
+                                         "user": "u", "database": "d"})
+    body = client.get("/api/connections").json()
+    assert body["connections"]["ok"]["complete"] is True
+    assert body["incomplete"] == []
+    assert body["active_missing"] is False
+    assert body["has_usable"] is True
 
 
 @allure.story("SQL 查询回落到 config.ini 的激活连接")

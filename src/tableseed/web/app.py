@@ -16,11 +16,12 @@ from typing import Any, Iterator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from .. import service
 from ..errors import TableSeedError
-from ..models import SeedConfig
+from ..errors_cn import explain_validation
+from ..models import DatabaseSpec, SeedConfig
 from .security import SqlRejected, validate_readonly
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -452,19 +453,43 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     @app.get("/api/connections")
     def get_connections() -> dict[str, Any]:
-        """全部连接 + 当前激活名。回显不含明文密码，只给脱敏串。"""
+        """全部连接 + 当前激活名。
+
+        每条连接附脱敏串（masked）与密码来源（password_source），供页面回显；
+        `incomplete` 列出缺 host/url 的连接（页面要标出来，不能静默丢弃）；
+        `active_missing` 表示当前连接指向一个已不存在的连接。
+        **只捕获校验异常**：曾经这里用宽 except Exception，把 DatabaseSpec
+        未导入的 NameError 一起吞成「(配置有误: ...)」—— 页面看着像数据坏了，
+        实际是代码 bug，藏了很久。
+        """
         from ..config.connections import ConnectionsStore  # noqa: PLC0415
 
         data = ConnectionsStore().load()
+        incomplete = set(data["incomplete"])
         connections = {}
         for name, fields in data["connections"].items():
+            entry = {**fields, "complete": name not in incomplete}
             try:
                 spec = DatabaseSpec.model_validate(fields)
-                entry = {**fields, "masked": spec.describe(), "password_source": spec.password_source}
-            except Exception as exc:  # 单条坏数据不影响整体
-                entry = {**fields, "masked": f"(配置有误: {exc})", "password_source": "invalid"}
+            except ValidationError as exc:
+                entry.update(
+                    masked=f"(连接信息不完整: {explain_validation(exc)})",
+                    password_source="invalid",
+                )
+            except Exception as exc:  # 代码 bug 必须炸出来，不吞
+                raise HTTPException(
+                    status_code=500, detail=f"连接回显失败（内部错误）: {exc}"
+                ) from exc
+            else:
+                entry.update(masked=spec.describe(), password_source=spec.password_source)
             connections[name] = entry
-        return {"active": data["active"], "connections": connections}
+        return {
+            "active": data["active"],
+            "connections": connections,
+            "incomplete": data["incomplete"],
+            "active_missing": data["active_missing"],
+            "has_usable": data["has_usable"],
+        }
 
     @app.put("/api/connections")
     def put_connection(payload: dict[str, Any]) -> dict[str, Any]:
@@ -494,8 +519,20 @@ def create_app(config_path: str | None = None) -> FastAPI:
         from ..config.connections import ConnectionsStore  # noqa: PLC0415
 
         name = payload.get("name") or ""
+        store = ConnectionsStore()
+        data = store.load()
+        if name not in data["connections"]:
+            raise HTTPException(
+                status_code=400, detail=f"连接 {name!r} 不存在（可能已被删除）"
+            )
+        # 切到信息不全的连接等于把自己切成不可用 —— 先拦下，别切了再报错
+        if name in data["incomplete"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"连接 {name!r} 信息不完整（缺数据库地址），无法切换 —— 请补全 host 后再切换",
+            )
         try:
-            ConnectionsStore().set_active(name)
+            store.set_active(name)
         except TableSeedError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         state.log_operation("切换连接", f"当前连接 → {name}")
