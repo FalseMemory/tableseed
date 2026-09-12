@@ -122,8 +122,8 @@ class AppState:
         self.last_result: Any = None
         #: 操作日志（内存最近 500 条 + JSONL 落盘）—— 插入等关键动作可追溯
         self.operation_logs: list[dict[str, Any]] = []
-        #: 最近一次「确认插入」的指纹，防止同一批数据被重复插入
-        self.inserted_fingerprint: tuple | None = None
+        #: 最近一次「确认插入」的数据内容哈希 —— 防止同一批数据被重复插入
+        self.inserted_hash: str | None = None
         self.logs_file = Path("logs") / "operations.log"
         self._restore_logs()
 
@@ -699,13 +699,14 @@ def create_app(config_path: str | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="还没有生成过数据 —— 请先点「生成数据」")
 
         result = state.last_result
-        fingerprint = (result.seed, tuple(sorted((n, len(d)) for n, d in result.tables.items())))
-        if state.inserted_fingerprint == fingerprint:
-            state.log_operation("插入", "重复插入被拦截（同一批数据已插入过）", ok=False)
+        fingerprint = _result_fingerprint(result)
+        if state.inserted_hash == fingerprint:
+            state.log_operation("插入", "重复插入被拦截（数据内容与上次完全相同）", ok=False)
             return {
                 "ok": False,
                 "duplicate": True,
-                "message": "这批数据已经插入过了。如需再插一份，请重新生成（同 seed 会生成同样数据，建议改 seed）",
+                "message": "本次预览的数据与上一次插入的数据完全相同，直接插入会因主键冲突失败。"
+                           "请修改配置（取值、行数、主键规则等）后重新生成，再点确认插入。",
             }
 
         url = _resolve_url(state, payload.get("dsn"), payload.get("database"))
@@ -735,7 +736,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         elapsed = int((_time.perf_counter() - started) * 1000)
-        state.inserted_fingerprint = fingerprint
+        state.inserted_hash = fingerprint
         summary = ", ".join(f"{n} {len(d)} 行" for n, d in result.tables.items())
         state.log_operation("插入", f"入库成功（{summary}，{elapsed} ms）")
         return {
@@ -1053,6 +1054,28 @@ def _reflect_ddl(url: str, table: str) -> str:
         return str(CreateTable(metadata.tables[table]).compile(engine)).strip() + ";"
     finally:
         engine.dispose()
+
+
+def _result_fingerprint(result) -> str:
+    """生成结果的**内容哈希**：任何一行数据变了指纹就变。
+
+    旧实现用 (seed, 表名, 行数) 做指纹 —— 用户改了主键规则后行数不变，
+    会被误判成"同一批数据"而拒绝插入。防重复的唯一可靠依据是数据本身。
+    """
+    import hashlib
+    import json
+
+    digest = hashlib.sha256()
+    for name in sorted(result.tables):
+        data = result.tables[name]
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\x00")
+        digest.update(json.dumps(
+            {"columns": data.columns, "rows": data.to_records()},
+            ensure_ascii=False, sort_keys=True, default=str,
+        ).encode("utf-8"))
+        digest.update(b"\x00")
+    return digest.hexdigest()
 
 
 def _mask_url(url: str) -> str:

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from tableseed.config.connections import ConnectionsStore
 from tableseed.models import DatabaseSpec
+from tableseed import service
 from tableseed.web.app import create_app
 
 CONFIG = """
@@ -213,9 +214,63 @@ def test_activate_unknown_connection(tmp_path, monkeypatch):
     assert res.status_code == 400
 
 
+# ---------------------------------------------------------------- 确认插入的防重复
+
+
+@allure.feature("数据库连接")
+@allure.story("指纹 = 数据内容哈希（改了主键/取值必须变）")
+def test_fingerprint_is_content_hash():
+    from tableseed.sink import MemorySink
+    from tableseed.web.app import _result_fingerprint
+
+    config_a = """
+seed: 1
+tables:
+  - name: t_a
+    groups:
+      - {type: enum, name: g_s, fields: [s], values: [["01"], ["02"]]}
+"""
+    res_a = service.generate(service.load_text(config_a), sink=MemorySink())
+    res_a2 = service.generate(service.load_text(config_a), sink=MemorySink())
+    assert _result_fingerprint(res_a) == _result_fingerprint(res_a2)   # 同配置同 seed → 同指纹
+
+    changed = config_a.replace('values: [["01"], ["02"]]', 'values: [["X1"], ["Y2"]]')
+    res_b = service.generate(service.load_text(changed), sink=MemorySink())
+    assert _result_fingerprint(res_b) != _result_fingerprint(res_a)    # 数据变了 → 指纹变
+
+
+@allure.feature("数据库连接")
+@allure.story("确认插入：改了配置（数据内容变化）后必须放行")
+def test_insert_allows_changed_data(tmp_path, monkeypatch):
+    """回归：旧指纹是 (seed, 表名, 行数) —— 改主键后行数不变被误判重复。
+    指纹必须是数据内容哈希：任何一行数据变了都要放行。"""
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(create_app())
+
+    config_text = """
+seed: 1
+tables:
+  - name: t_a
+    groups:
+      - {type: enum, name: g_s, fields: [s], values: [["01"], ["02"]]}
+"""
+    # 第一次生成 + 插入（内存 sink，不真连库 —— 指纹拦截在连库之前）
+    gen1 = client.post("/api/generate/stream", json={"text": config_text})
+    assert gen1.status_code == 200
+
+    # 改主键/取值规则 → 数据内容变化（行数不变），重新生成
+    changed = config_text.replace('values: [["01"], ["02"]]', 'values: [["X1"], ["Y2"], ["Z3"]]')
+    gen2 = client.post("/api/generate/stream", json={"text": changed})
+    assert gen2.status_code == 200
+
+    # 插入接口在未配置连接时 400，但**不能**是 duplicate 拦截
+    res = client.post("/api/insert", json={})
+    assert res.status_code == 400
+    assert not res.json()["detail"].startswith("本次预览的数据")
+
+
 @allure.story("SQL 查询回落到 config.ini 的激活连接")
 def test_query_falls_back_to_ini_connection(tmp_path, monkeypatch):
-    """页面不传连接、YAML 也没有 database 段时，用 ini 的激活连接。"""
     monkeypatch.chdir(tmp_path)
     client = TestClient(create_app())
     client.put("/api/config", json={"text": CONFIG})
