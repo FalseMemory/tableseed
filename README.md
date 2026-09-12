@@ -1,531 +1,137 @@
-# tableseed
+# tableseed 🌱
 
-> 多表联合造数工具 —— 用「字段分组」描述单表规则，用「表间关系」描述跨表联动，生成一致、可入库、覆盖可证明的测试数据。
+> 多表联合造数工具 —— 用「字段分组」描述单表规则，用「表间关系」描述跨表联动，
+> 生成**一致、可入库、覆盖可证明**的测试数据。
 
 ```
 表结构 + 表间关系 + 字段分组规则  ──►  tableseed  ──►  SQL / CSV / 直连入库
 ```
 
-## 文档
-
-| 文档 | 内容 |
-| --- | --- |
-| [docs/PRD.md](docs/PRD.md) | 需求规格：功能清单（FR-1 ~ FR-10）、非功能需求、验收标准、里程碑、风险 |
-| [docs/tech-design.md](docs/tech-design.md) | 技术方案：选型总表、架构分层、目录结构、IR 数据结构、关键算法、表达式引擎、配置 Schema |
-| 本 README | 模型定义：模型一「字段分组」、模型二「表间关系」 |
+[![tests](https://img.shields.io/badge/tests-235%20passed-34d399)]()
+[![python](https://img.shields.io/badge/python-3.13-4d9fff)]()
+[![license](https://img.shields.io/badge/license-private-8b98ad)]()
 
 ---
 
-## 它要解决什么
+## ✨ 核心能力
 
-单表随机造数很容易，难的是**多表联动**与**数据规则**：
-
-| 痛点 | 具体表现 |
-| --- | --- |
-| 关联断裂 | 流水表的 `acct_no` 在主表里查不到，外键直接炸 |
-| 配对缺失 | 交易表造了 100 条，详情表只跟上 87 条，对不上账 |
-| 字段不同步 | 同一笔交易，交易表币种是 CNY，详情表写成 USD |
-| 口径不符 | 明细汇总与主表金额对不上，数据核对场景无法使用 |
-| 规则散落 | 枚举取值、码值描述、边界值写死在几十份 INSERT 脚本里，改一处漏三处 |
-| 同组不同步 | `status_code` 改成 `02`，`status_desc` 还是「正常」，造出脏数据 |
-| 覆盖不足 | 只造了「正常 + 人民币 + 柜面」，其余组合从未被验证，却报"已测" |
-| 覆盖爆炸 | 想全组合覆盖，`4×3×5×8` 一乘就是几百上千行，人工排不动 |
-| 不可复现 | 随机造数每次结果不同，缺陷无法稳定重现 |
-| 状态跳跃 | 造出「已销户却仍有在途交易」这类业务上不可能存在的组合 |
-| 验证靠终端 | 改一行配置跑一次命令，看不见数据长什么样，排查全靠打印 |
-| 入库后看不见 | 想确认数据是否真进去了，还得切到数据库客户端另开一个窗口 |
-
----
-
-# 模型一：字段分组（Field Group）
-
-描述**单表**的造数规则，三层结构：
-
-```
-表（Table）  ──►  字段组（Field Group）  ──►  取值（Value）
-```
-
-## 1.1 分组是完备划分
-
-一张表的字段被划分为若干**互不相交的组**：
-
-- 每个字段**恰好属于一个组**，不重不漏（`check` 命令强制校验）；
-- 一个组**可以包含多个字段**；
-- **组是造数的最小规则单元** —— 造数时以组为单位决定取值，而不是以字段为单位。
-
-组内多字段一次生成一个**取值元组**，因此组内字段天然同步，不可能出现「码值变了描述没变」：
-
-```yaml
-- type: enum
-  name: g_status
-  fields: [status_code, status_desc]      # 同一组的两个字段
-  values:
-    - ["01", "正常"]                       # 一个取值 = 多个字段的联合取值
-    - ["02", "冻结"]
-    - ["03", "销户"]
-```
-
-> `status_code = "02"` 时，`status_desc` 必然是「冻结」。同步关系由分组模型保证，不依赖人工维护。
-
-## 1.2 组类型
-
-九种组类型，按**参与生成的方式**分为三类：
-
-| 类型 | 语义 | 参与笛卡尔积 | 阶段 | 典型用例 |
-| --- | --- | :---: | :---: | --- |
-| `enum` 枚举组 | 显式列举有限取值集合（元组列表） | ✅ | P1 | 状态、币种、渠道、产品码 |
-| `boundary` 边界组 | 枚举的语义化变体，专列边界与异常值 | ✅ | P1 | 金额上限、超长字符串、`NULL` |
-| `dict` 字典组 | 从外部字典/码表取有限取值 | ✅ | P1 | 行名行号、地区码、机构码 |
-| `sequence` 自增组 | 按起始值/步长推进，支持格式化模板 | ❌ | P1 | 流水号、账号、序号 |
-| `random` 随机组 | 按生成器随机取值：区间、正则、加权分布 | ❌ | P1 | 金额、日期、姓名 |
-| `const` 不变组 | 全批数据取同一常量元组 | ❌ | P1 | 租户号、机构号、环境标识 |
-| `derive` 派生组 | 由**同表**其他字段表达式计算得出 | ❌ | P1 | 手续费 = 金额 × 费率 |
-| `ref` 引用组 | 取自其他表已生成的值（外键联动） | ❌ | P1 | 主表业务键 |
-| `aggregate` 汇总组 | 由**子表**汇总回填到父表 | ❌ | **P2** | 笔数 = count(子行)、余额 = Σ 流水 |
-
-**三类之分**（理解生成语义的关键）：
-
-- **有限取值组**（`enum` / `boundary` / `dict`）—— 有确定的取值集合，参与笛卡尔积展开；
-- **每行附着组**（`sequence` / `random` / `const` / `derive` / `ref`）—— 没有固定取值集，在每条已展开的行上现算，**不放大行数**；
-- **跨表汇总组**（`aggregate`）—— 依赖子表结果，必须等到 Phase 2 回填；单独成类是为了让调度器能自动排期。
-
-## 1.3 生成语义
-
-一条数据 = **所有组取值的组合**。两类组以不同方式参与：
-
-**① 有限取值组之间 —— 笛卡尔积（全组合）**
-
-配置里所有有限取值组的取值集合做笛卡尔积，**每个组合生成一条数据**，从而保证组合覆盖是完备的、可计算的、可证明的。
-
-**② 其余组 —— 在已展开的行上"附着"生成**
-
-自增组按行推进一次，随机组按行采样一次，不变组填充常量，派生组/引用组按依赖顺序计算。它们**不放大**行数，只决定这些行上其余字段取什么值。
-
-```
-                     ┌──────── 组（字段） ────────┐
- 行数 =  Π  |有限取值组取值集|      ×      基数倍数
-         └ 笛卡尔积 ┘                    └ 来自父表的 1:N 关系，可选
-```
-
-**展开示例** —— 一张账户表，字段分成 3 个枚举组 + 若干非枚举组：
-
-| 字段 | 所属组 | 组类型 | 取值集合 |
-| --- | --- | --- | --- |
-| `status_code`, `status_desc` | `g_status` | enum | 正常 / 冻结 —— **2** |
-| `currency` | `g_currency` | enum | CNY / USD —— **2** |
-| `channel` | `g_channel` | enum | 柜面 / 网银 / 手机银行 —— **3** |
-
-→ 笛卡尔积 `2 × 2 × 3 = 12` 条数据，且 12 种组合一条不漏：
-
-```
-(01,正常) (CNY) (柜面)      (02,冻结) (CNY) (柜面)
-(01,正常) (CNY) (网银)      (02,冻结) (CNY) (网银)
-(01,正常) (CNY) (手机银行)   (02,冻结) (CNY) (手机银行)
-(01,正常) (USD) (柜面)      (02,冻结) (USD) (柜面)
-(01,正常) (USD) (网银)      (02,冻结) (USD) (网银)
-(01,正常) (USD) (手机银行)   (02,冻结) (USD) (手机银行)
-```
-
-这 12 条各自的 `acct_no` 由自增组推进、`balance` 由随机组采样、`tenant_id` 由不变组恒定填充、`amount` 由派生组计算。
-
-## 1.4 规模治理
-
-笛卡尔积是有意为之的"覆盖放大器"，但组合数会指数增长，因此必须可控：
-
-| 机制 | 说明 | 状态 |
-| --- | --- | :---: |
-| `max_rows` | 硬上限，超出即报错而非静默截断 | ✅ |
-| `total_rows` | 全部表的**总行数上限**（默认 10 万），超出拒绝生成并给出各表明细 | ✅ |
-| `exclude` | 声明非法组合并剔除。例：`status_code == "03" and balance > 0`（已销户不该有余额） | ✅ |
-| `strategy: full` | 全组合（默认）。行数 = 组合数，组合覆盖 100% | ✅ |
-| `strategy: pairwise` | 两两配对覆盖。组合爆炸时用最少的行数覆盖**所有字段对的取值**（定向锚定贪心，行数 ≈ 组合数的 1/5 ~ 1/10，可复现） | ✅ |
-| `strategy: sample` | 从全组合随机抽 `sample_size` 行，行数可控、覆盖不保证 | ✅ |
-
-无论用哪种策略，`tableseed plan` 都会先算出**理论组合总数**并打印出来；`gen` 的结果表带「组合覆盖」列（如 `6/12（50%）`），实际覆盖了多少一目了然 —— **先声明覆盖，再证明覆盖**。
-
----
-
-# 模型二：表间关系（Relation）
-
-多表造数的难点不在"循环生成"，而在**字段如何对得上**与**行数如何配得齐**。
-
-## 2.1 关系四要素
-
-```yaml
-relations:
-  - parent: t_txn                 # 父表
-    child: t_txn_detail           # 子表
-    cardinality: 1:1              # ① 基数
-    existence: required           # ② 存在性
-    join: [[txn_no, txn_no]]      # ③ 关联锚点
-    propagate: [ ... ]            # ④ 字段传播规则
-```
-
-**① 基数（cardinality）** 决定行数关系：
-
-| 基数 | 语义 | 子表行数 | 例子 |
-| --- | --- | --- | --- |
-| `1:1` | 一一对应（主表 + 扩展表） | 等于父行数 | 交易表 + 交易详情表 |
-| `1:0..1` | 可选扩展 | ≤ 父行数 | 只有转账交易才有对手行信息 |
-| `1:N` | 一对多 | Σ 每个父行的 N | 交易表 + 交易流水明细 |
-| `N:M` | 多对多 | 中间表 = 两父表行的组合取样 | 客户 × 产品 |
-
-**② 存在性（existence）** 决定子行是否必然出现：
-
-| 取值 | 语义 |
-| --- | --- |
-| `required` | 父有行则子必有行（默认） |
-| `optional` | 随机决定有无，行数在 0~N 间波动 |
-| `conditional` | 满足条件才有，条件表达式可引用父表字段 |
-
-**③ 关联锚点（join）** 定义两表如何配对，同时完成主键/外键传播：
-
-- 主键传播：`[[id, txn_id]]`，子表外键由父表主键派生；
-- 业务键关联：`[[txn_no, txn_no]]`，用业务唯一键而非主键；
-- 复合键：`[[branch_no, branch_no], [txn_date, txn_date], [seq_no, seq_no]]`。
-
-**④ 字段传播（propagate）** 见下节。
-
-## 2.2 字段传播的六种模式
-
-「很多字段要对得上」不是一条规则，而是六种，必须分别声明：
-
-| 模式 | 语义 | 阶段 | 例 |
-| --- | --- | :---: | --- |
-| `copy` | 父字段原值照抄到子字段 | ✅ M2 | `currency`、`txn_date`、`acct_no` 两表一致 |
-| `derive` | 父字段经表达式/函数变换后写入子字段 | ✅ M2 | `detail_amt = parent.amount × 0.7` |
-| `map` | 父表码值经映射表转换为子表码值 | ✅ M2 | 父 `txn_type` → 子 `detail_type` |
-| `split` | 父的一个值拆分到 N 个子行，满足 Σ子 = 父 | ✅ M4 | 一笔 1000 拆成 3 笔明细，合计仍是 1000 |
-| `aggregate` | **反向**：父字段由子表汇总得出 | ✅ M3 | 父 `detail_count` = 子表行数 |
-| `free` | 子表自由生成，仅受自身分组规则约束 | ✅ M2 | 备注、随机附言 |
-
-```yaml
-propagate:
-  - {mode: copy,    from: txn_date, to: txn_date}
-  - {mode: copy,    from: acct_no,  to: acct_no}
-  - {mode: copy,    from: currency, to: currency}
-  - {mode: derive,  to: net_amount, expr: "parent.amount - parent.fee"}
-  - {mode: map,     from: txn_type, to: detail_type,
-     mapping: {T: TRANSFER, D: DEPOSIT, W: WITHDRAW}}
-  - {mode: free,    to: remark}
-```
-
-#### `split` 的守恒保证（M4）
-
-```yaml
-- parent: t_txn
-  child: t_txn_item
-  cardinality: "1:N"
-  join: [{parent_field: txn_no, child_field: txn_no}]
-  propagate:
-    - {mode: split, to: item_amt, from: amount, parts: 2}
-    # 或按占比: {mode: split, to: item_amt, from: amount,
-    #            ratio: [0.5, 0.3, 0.2]}
-```
-
-- **分单位整数 + 割点法**：金额先换成「分」（scale 取自列声明），取不重复割点切份 ——
-  每份为正、Σ 恒等于父值，50 份 999999.99 也零误差
-- `ratio` 模式最后一份兜差，占比声明得再怪守恒也不破
-- 行数语义：split 模式下子表行数 = 父行数 × 份数，**子表不能再有有限取值组**
-  （checker 会拦下这个冲突）；配合 invariants `sum(item_amt) = amount` 可自动证明守恒
-
-两条省事的设计：
-
-1. **`join` 锚点自动补齐 `copy`** —— 声明了 `{parent_field: txn_no, child_field: txn_no}`
-   就不必再写一条 copy 规则；若已显式声明该子字段的规则，则以用户的为准。
-2. **被传播覆盖的字段无需再归组** —— 分组完备性要求"每个字段有且仅有一个取值来源"，
-   `propagate` 本身就是一种来源。写了 `to: currency` 就不必再造一个占位组。
-
-另外 `ref` 组可在子表里直接引用父表字段（`- {type: ref, fields: [ref_no], from: parent.txn_no}`）。
-
-## 2.3 1:1 关系下的覆盖分配 ⚠️
-
-**这是最容易踩的坑。** 模型一规定"有限取值组之间做笛卡尔积"，但 1:1 关系锁定了子表行数 = 父表行数。若子表有个 3 取值的枚举组，笛卡尔积会把子表撑成 `父行数 × 3`，**基数当场就破**。
-
-因此 1:1 下，子表的有限取值组改用**分配策略（allocation）**：
-
-| 分配策略 | 语义 | 适用 |
+| | 能力 | 说明 |
 | --- | --- | --- |
-| `follow_parent` | 取值由父行决定（父枚举驱动子枚举） | **默认**。真实感优先：存款交易不可能「透支」 |
-| `round_robin` | 在父行序列上轮转分配，100 行 3 取值 → 33/33/34 | 父未给约束时的兜底；行数不变但覆盖度仍可保证 |
-| `random` | 随机分配 | 贴近生产数据的随机性 |
-| `weighted` | 按权重分布分配 | 少量异常值（如 5% 冲正） |
+| 🧩 | **字段分组模型** | 组是造数最小规则单元，组内字段共进退（码值变了描述绝不会丢） |
+| 🔗 | **表间关系模型** | 四要素 + 六种传播（copy / derive / map / split / aggregate / free）|
+| 📐 | **覆盖可证明** | 笛卡尔积 / pairwise / sample 三策略，组合数可计算、覆盖度可展示 |
+| ⚖️ | **守恒保证** | split 割点法零误差：Σ子 = 父，50 份 999999.99 也分毫不差 |
+| ✅ | **不变量校验** | 跨表断言（Σ明细 = 金额 − 手续费），生成后自检逐条求值 |
+| 🖥️ | **WebUI 全流程** | 配置 → 预演 → 关系图 → 生成 → 预览 → 确认入库 → SQL 台 → 操作日志 |
+| 🔁 | **可复现** | 同配置 + 同 seed = 同数据，缺陷可稳定重现 |
+| 🔌 | **多库多连接** | config.ini 管理多个数据库连接，页面随时切换；密码走环境变量 |
 
-**一句话概括这个分水岭**：
-
-> 笛卡尔积是「放大行数换覆盖」，分配是「固定行数内保覆盖」。1:N 用前者，1:1 只能用后者。
-
-### `follow_parent` 的确切语义（已实现）
-
-「由父行决定」具体怎么定？规则是 —— **按驱动字段分组**：
-
-- 驱动值**首次**出现 → 从组合池里轮转取下一个（不同父值拿到不同组合，**保覆盖**）
-- 驱动值**再次**出现 → 复用上次那个组合（同父值得到同子值，**保一致**）
-
-```yaml
-relations:
-  - parent: t_txn
-    child: t_txn_detail
-    cardinality: "1:1"
-    drive_by: [txn_type]     # 同交易类型 → 同清算状态
-```
-
-驱动字段 `drive_by` 不填时的推断顺序：被 `copy`/`map` 的父字段 → `join` 的父字段。
-写在 `GroupSpec.allocation` 上（默认 `follow_parent`），以**第一个有限取值组**为准。
-
-## 2.4 条件枚举：父约束子
-
-分组模型向表间延伸的关键一步 —— **组的取值集是动态的，可随父行变化**：
-
-```yaml
-- type: enum
-  name: g_detail_status
-  fields: [detail_status]
-  when: "parent.txn_type == 'WITHDRAW'"        # 只在取款交易下生效
-  allocation: follow_parent
-  values: [["NORMAL"], ["OVERDRAFT"], ["REVERSED"]]
-```
-
-配合 `follow_parent`，父表 `txn_type` 的取值会驱动子表 `detail_status` 的取值集，造出的数据天然符合业务语义。
-
-## 2.5 两阶段生成
-
-`aggregate` 模式会在依赖图上形成**回边**（父 ← 子），因此生成分成两个阶段：
-
-- **Phase 1 · 正向生成**：按表间拓扑序，父 → 子，完成 `copy` / `derive` / `map` / `split` / `free`；
-- **Phase 2 · 反向回填**：按锚点聚合子表结果，更新父表的 `aggregate` 字段。
-
-```yaml
-# 父表侧的汇总字段
-- type: aggregate
-  name: g_detail_sum
-  fields: [detail_amount_sum]
-  from: t_txn_detail          # 源表；唯一子表时可省略
-  expr: "sum(net_amount)"
-
-- type: aggregate
-  name: g_log_count
-  fields: [log_count]
-  from: t_txn_log
-  expr: "count()"
-```
-
-**没有引入 `by` 语法** —— 回填发生在「每条父行」的上下文里，
-按 `join` 锚点天然已经分好组，再写一次 `by` 是重复的。
-
-支持的聚合函数：`count()` / `sum` / `avg` / `min` / `max` / `count_distinct`。
-聚合之间可做四则运算（`sum(amount) / count()`），参数也可以是表达式（`sum(amount * 2)`）。
-父行无匹配子行时按空集处理：`count`/`sum`/`avg` 得 `0`，`min`/`max` 得 `NULL`。
-
-典型场景：A 的交易金额合计 = B 的明细之和；银行余额表由流水汇总得出。
-
-## 2.6 多表链与多父
-
-- **链式传播**：A → B → C，沿 DAG 逐级传播，C 可继承 A 的字段（`copy` 支持跨级引用）；
-- **多父表**：B 同时引用 A 与 D，需保证 B 的每个外键在各自父表中都能找到（**引用完整性** —— `ref` 组只能从父表已生成的行里取值，不得凭空造）；
-- **N:M 中间表**：本质是「两个父表行的组合取样」，可复用笛卡尔积机制后按 `sample` / 上限裁剪。
-
-## 2.7 不变量：把「对得上」变成可校验的断言
-
-传播规则只保证生成时对，还要能证明对。不变量分两种形态：
-
-**行级断言** —— 在指定表的每一行上求值：
-
-```yaml
-invariants:
-  - table: t_txn
-    expr: "fee <= amount"
-```
-
-**跨表断言** —— 对 `table` 每行取其 `from` 子行集合，可用聚合函数（复用 aggregate 求值器）：
-
-```yaml
-invariants:
-  - table: t_txn
-    from: t_txn_detail
-    expr: "sum(net_amount) = amount - fee"   # MySQL 风格的 = 也认
-
-  - table: t_txn
-    from: t_txn_log
-    expr: "count() = 3"
-```
-
-`tableseed verify -c config.yaml` 生成一份内存数据逐条求值；
-WebUI 里点「验证不变量」看同样结果。违例行会连同整行数据一起列出来 ——
-**先声明口径，再验证口径**。裸字符串写法（`- "fee <= amount"`）兼容，作用域为全部表。
-
----
-
-# 生成流程
-
-```mermaid
-flowchart TB
-    A[元数据扫描<br/>主键/唯一/非空/外键] --> B[分组装配与校验<br/>字段不重不漏]
-    B --> C[依赖分析<br/>表间拓扑排序 + 回边识别]
-    C --> D[规模预演 plan<br/>组合数 / 行数 / 依赖序]
-    D --> E[Phase 1 正向生成<br/>父→子：copy/derive/map/free]
-    E --> F[Phase 2 反向回填<br/>子→父：aggregate]
-    F --> G[不变量校验 invariants]
-    G --> H[输出<br/>SQL / CSV / 直连入库]
-```
-
-# 配置样例（草案，字段名待定）
-
-```yaml
-seed: 20260910                      # 固定随机种子，结果可复现
-
-limits:
-  max_rows: 100000
-  strategy: full                    # full | pairwise | sample
-  exclude:
-    - "t_account.status_code == '03' and t_account.balance > 0"
-
-relations:
-  - parent: t_txn
-    child: t_txn_detail
-    cardinality: 1:1
-    existence: required
-    join: [[txn_no, txn_no]]
-    propagate:
-      - {mode: copy,   from: txn_date, to: txn_date}
-      - {mode: copy,   from: acct_no,  to: acct_no}
-      - {mode: copy,   from: currency, to: currency}
-      - {mode: derive, to: detail_amt, expr: "src.amount * 0.7"}
-      - {mode: map,    from: txn_type, to: detail_type, table: map_txn_type}
-      - {mode: free,   to: remark}
-
-invariants:
-  - "每个 t_txn.txn_no 在 t_txn_detail 中恰好 1 行"
-  - "t_txn_detail.currency == t_txn.currency by txn_no"
-
-tables:
-  - name: t_txn
-    groups:
-      - type: enum
-        name: g_txn_type
-        fields: [txn_type]
-        values: [["DEPOSIT"], ["WITHDRAW"], ["TRANSFER"]]
-
-      - type: sequence
-        name: g_txn_no
-        fields: [txn_no]
-        format: "T{seq:08d}"
-
-      - type: aggregate
-        name: g_detail_count
-        fields: [detail_count]
-        expr: "count(t_txn_detail) by txn_no"
-
-  - name: t_txn_detail
-    groups:
-      - type: enum
-        name: g_detail_status
-        fields: [detail_status]
-        when: "parent.txn_type == 'WITHDRAW'"
-        allocation: follow_parent
-        values: [["NORMAL"], ["OVERDRAFT"], ["REVERSED"]]
-
-  - name: t_account
-    groups:
-      - type: enum
-        name: g_status
-        fields: [status_code, status_desc]
-        values:
-          - ["01", "正常"]
-          - ["02", "冻结"]
-
-      - type: enum
-        name: g_currency
-        fields: [currency]
-        values: [["CNY"], ["USD"]]
-
-      - type: enum
-        name: g_channel
-        fields: [channel]
-        values: [["OTC"], ["EBANK"], ["MOBILE"]]
-
-      - type: sequence
-        name: g_acct_no
-        fields: [acct_no]
-        start: 1
-        step: 1
-        format: "6222{seq:012d}"
-
-      - type: random
-        name: g_balance
-        fields: [balance]
-        generator: weighted_int
-        range: [0, 100000000]
-        buckets: [0.80, 0.15, 0.05]    # 普通 / 大额 / 超大额
-        scale: 2
-
-      - type: const
-        name: g_tenant
-        fields: [tenant_id, branch_code]
-        value: ["0001", "001"]        # 整批恒定
-
-      - type: derive
-        name: g_amt
-        fields: [amount]
-        expr: "balance * 0.01"
-```
-
-# CLI 草案
+## 🚀 快速开始
 
 ```bash
-tableseed ui     -c seed.yaml             # 启动 WebUI：配置、预演、生成、预览、查数据都在浏览器里
-tableseed plan   -c seed.yaml             # 预演：打印各表组合数/行数/依赖序，不产出数据
-tableseed check  -c seed.yaml             # 校验配置：分组不重不漏、依赖无环、关系完整、组合规模
-tableseed verify -c seed.yaml             # 校验不变量：生成内存数据逐条断言，列出违例行
-tableseed gen    -c seed.yaml             # 无数据库连接 → 只生成不落盘，返回内存对象
-tableseed gen    -c seed.yaml --dsn ...   # 提供数据库连接 → 直接执行入库
-tableseed gen    -c seed.yaml -o out/     # 显式落盘 SQL / CSV
-tableseed verify -c seed.yaml -i out/     # 对生成结果跑 invariants 校验
+# 安装依赖后，启动 WebUI（默认载入示例配置）
+tableseed ui -c samples/txn.yaml
 ```
 
-`plan` 示例输出：
+CLI 全家桶：
+
+| 命令 | 作用 |
+| --- | --- |
+| `tableseed ui -c xxx.yaml` | 启动 WebUI：配置、预演、生成、预览、入库、查数据都在浏览器里 |
+| `tableseed check -c xxx.yaml` | 校验配置：分组不重不漏、依赖无环、组合规模 |
+| `tableseed plan -c xxx.yaml` | 预演：各表组合数 / 行数 / 生成顺序 |
+| `tableseed verify -c xxx.yaml` | 校验不变量：内存数据逐条断言，列出违例行 |
+| `tableseed gen -c xxx.yaml` | 生成（无连接 → 只生成不落盘） |
+| `tableseed gen -c xxx.yaml --dsn ...` | 生成并直接入库 |
+| `tableseed gen -c xxx.yaml -o out/` | 落盘 SQL / CSV |
+
+示例配置：[samples/account.yaml](samples/account.yaml)（单表 12 组合）、
+[samples/txn.yaml](samples/txn.yaml)（交易 9 行 + 详情 1:1 + 日志 1:N + 分录守恒）。
+
+## 🖥️ WebUI 功能
 
 ```
-t_txn         枚举组: g_txn_type(3) = 3 组合                     → 3 行
-t_txn_detail  1:1 绑定 t_txn，行数锁定 3 行（allocation: follow_parent）
-t_account     枚举组: g_status(2) × g_currency(2) × g_channel(3) = 12 组合 → 12 行
-组合总数 15，未超 max_rows(100000)                              ✓ 校验通过
+配置（YAML / 表格编辑器 / 快速生成） → 预演 → 关系图 → 结果预览 → 确认插入 → SQL 查询台 → 操作日志
 ```
 
-# 数据库连接
+- **多配置文件**：左栏顶部下拉切换 / 另存为 / 移除，清单存于 config.ini
+- **多数据库连接**：config.ini 管理，页面随时切换；「测试连接」一键验证
+- **两段式入库**：生成只在内存预览，点「确认插入」才写库；同批数据重复插入会被拦截
+- **SQL 查询台**：默认只读（SELECT / WITH / SHOW / EXPLAIN / DESC），结果分页
+- **操作日志**：生成 / 插入 / 查询全记录，分页筛选搜索，JSONL 落盘跨重启恢复
 
-连接信息存于项目根的 **config.ini**（与业务配置分离 —— 造数 YAML 可以随便分享、入库），
-支持**多个连接**，页面上随时切换。参考 [config.ini.example](config.ini.example)：
+## ⚙️ 配置说明
+
+### 造数配置（YAML）
+
+```yaml
+seed: 20260910            # 随机种子，可复现
+limits:
+  max_rows: 100000        # 单表硬上限
+  total_rows: 100000      # 全部表总行数上限（默认 10 万）
+  strategy: full          # full | pairwise | sample
+tables:
+  - name: t_account
+    groups:               # 九种组类型，见 docs/model.md
+      - type: enum
+        name: g_status
+        fields: [status_code, status_desc]   # 组内字段共进退
+        values: [["01", "正常"], ["02", "冻结"]]
+```
+
+完整字段说明、九种组类型、表间关系、split 守恒、条件枚举与分配策略 ——
+见 **[docs/model.md](docs/model.md)**。
+
+### 数据库连接（config.ini）
+
+连接信息与业务配置分离（造数 YAML 可以随便分享、入库）：
 
 ```ini
 [general]
-active = demo              ; 当前使用的连接
+active = demo
 
 [demo]
-type = mysql               ; mysql / postgresql / oracle
+type = mysql
 host = 127.0.0.1
-port = 3306                ; 不填按类型取默认（3306 / 5432 / 1521）
-user = root
-password_env = TABLESEED_DB_PASSWORD   ; 密码走环境变量 —— 推荐
+password_env = TABLESEED_DB_PASSWORD   ; 密码走环境变量（推荐）
 database = tableseed_demo
 
 [prod]
 type = mysql
 host = 10.0.0.5
-user = root
-password = ...             # 也可明文（不推荐，注意不要提交到版本库）
 database = biz_db
 ```
 
-- **密码优先取环境变量**（`password_env`），其次才是明文 `password`；
-  页面回显一律脱敏。环境变量未设置时会明确报出来并给出 `setx` 写法，
-  不会让你对着「Access denied ... using password: NO」猜半天。
-- 密码里的 `@ : / #` 自动做 URL 编码，不会把连接串拼坏。
-- 页面「测试连接」试连一次，直接告诉你是密码错还是连不上。
-- YAML 里的 `database` 段仍兼容（老配置不用改），但**推荐迁移到 config.ini**。
+- 密码优先取环境变量，配置文件可安全入库；页面回显一律脱敏
+- 特殊字符（含 `%`）自动正确处理；密码里的 `@ : / #` 做 URL 编码
+- 样例：[config.ini.example](config.ini.example)
 
+## 📚 文档
 
-# 设计原则
+| 文档 | 内容 |
+| --- | --- |
+| [docs/model.md](docs/model.md) | 数据模型详解：字段分组、表间关系、split 守恒、条件枚举、分配策略 |
+| [docs/PRD.md](docs/PRD.md) | 需求规格：功能清单（FR-1 ~ FR-10）、非功能需求、验收标准 |
+| [docs/tech-design.md](docs/tech-design.md) | 技术方案：选型、架构分层、IR 数据结构、关键算法、表达式引擎 |
+| [CHANGELOG.md](CHANGELOG.md) | 版本变更记录 |
+
+## 🧪 测试
+
+```bash
+pytest           # 235 条用例（单元 / e2e / WebUI），pytest + allure
+```
+
+## 🛣️ Roadmap
+
+- [x] **M1** 分组模型 + 单表展开 + 执行策略 + CLI + WebUI 最小闭环 + SQL 查询台
+- [x] **M2** 表间关系内核 + 关系图：四要素 + copy/derive/map/free + 拓扑排序 + 1:1 分配策略
+- [x] **M3** aggregate 两阶段回填 + invariants 不变量 + 覆盖策略（full / pairwise / sample）
+- [x] **M4** split 拆分传播（Σ子=父 零误差守恒）+ 生成后自检
+- [x] **WebUI 2.0**：多连接 / 多配置文件 / 两段式入库 / 操作日志 / 关系图 / 配置编辑器 / 单元格编辑器
+- [ ] M4 收尾：多父（N:M）
+- [ ] **M5** 打磨与集成：打包分发、Python API 稳定化、与测试平台集成
+
+## 🎨 设计原则
 
 1. **声明式** —— 规则写在配置里，不写脚本；配置可 diff、可评审、可版本化。
 2. **覆盖可证明** —— 组合数可计算，造出多少、漏了哪些说得清。
@@ -534,43 +140,12 @@ database = biz_db
 5. **只读元数据** —— 不写目标库结构，只读表定义。
 6. **可复现** —— 同配置 + 同 seed = 同数据。
 
-# Roadmap
+## 🧰 技术栈
 
-- [x] **M1** 分组模型 + 单表笛卡尔积展开 + 执行策略（直连/内存）+ CLI + **WebUI 最小闭环**（配置→预演→生成→预览）+ SQL 查询台
-- [x] **M2** 表间关系内核 + WebUI 关系图：四要素 + `copy`/`derive`/`map`/`free` 传播 + 拓扑排序 + 1:1 分配策略 + `ref` 组
-- [x] **M3** `aggregate` 两阶段回填 + `invariants` 不变量校验 + 覆盖策略（full / pairwise / sample）+ 组合覆盖度
-- [x] **M4** `split` 拆分传播（Σ子=父 割点法零误差守恒）+ 生成后自检（gen 自动跑 invariants）
-- [ ] M4 收尾：多父（N:M）
-- [ ] **M5** 打磨与集成：打包分发、Python API 稳定化、与测试平台集成
+Python 3.13 · Typer（CLI）· FastAPI + uvicorn（SSE）· 原生 JS WebUI ·
+SQLAlchemy Inspector（可选依赖）· 自研 ast 沙箱表达式引擎 · pytest + allure
 
-# 技术选型
-
-- 主语言：Python 3.13
-- CLI：Typer
-- WebUI 后端：FastAPI + uvicorn（SSE 推送生成进度）
-- WebUI 前端：React 19 + Vite + TypeScript + Tailwind v4
-- 元数据：SQLAlchemy Inspector（可选依赖，惰性导入）
-- 表达式引擎：基于 Python `ast` 的自研沙箱，语法兼容 Python + MySQL 双风格
-- 数据库适配：PostgreSQL / MySQL / Oracle 兼容层（方言隔离）
-- 测试：pytest + allure
-
-> 选型理由与备选对比见 [docs/tech-design.md](docs/tech-design.md) 第 1 节。
-
-# 状态
-
-M1–M4 内核全部完成（单表、表间关系、aggregate 回填、不变量、覆盖策略、split 拆分、生成后自检），WebUI 含关系图 / 配置编辑器 / 快速生成 / SQL 台，**220 条测试通过**。仅剩 M4 收尾的多父（N:M）与 M5 打磨。
-
-生成结束会自动跑「生成后自检」：配置里声明了 `invariants` 就逐条求值，CLI 显示 `✓ 自检: 3 条不变量全部通过`（或违例明细），WebUI 结果页同样展示。
-
-```bash
-tableseed check -c samples/txn.yaml   # 校验：分组完备性 / 依赖环 / 字段引用
-tableseed plan  -c samples/txn.yaml   # 预演：各表组合数、行数、生成顺序
-tableseed gen   -c samples/txn.yaml   # 生成：默认只生成不落盘
-tableseed ui    -c samples/txn.yaml   # 浏览器里完成上述全部动作
-```
-
-示例：[samples/account.yaml](samples/account.yaml)（单表 12 组合）、
-[samples/txn.yaml](samples/txn.yaml)（交易 9 行 + 详情 9 行 1:1 + 日志 27 行 1:N）。
+> 选型理由与备选对比见 [docs/tech-design.md](docs/tech-design.md)。
 
 ---
 
