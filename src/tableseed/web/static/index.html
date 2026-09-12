@@ -1347,6 +1347,14 @@ $("cell-editor-collapse").addEventListener("click", () => {
 });
 
 </script>
+<dialog id="log-dialog" style="max-width:760px">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+    <b style="font-size:15px">操作详情</b>
+    <span class="spacer"></span>
+    <button onclick="this.closest('dialog').close()">关闭</button>
+  </div>
+  <pre id="log-dialog-content" style="white-space:pre-wrap;word-break:break-all;font-size:12.5px;line-height:1.6;margin:0"></pre>
+</dialog>
 <dialog id="help-dialog" style="max-width:820px;max-height:80vh;overflow:auto">
   <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
     <b style="font-size:15px">配置编辑器帮助 —— 组类型与取值/参数设置</b>

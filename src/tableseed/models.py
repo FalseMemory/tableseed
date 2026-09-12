@@ -196,9 +196,14 @@ class RelationSpec(_Model):
 
 
 class LimitsSpec(_Model):
-    """规模治理。"""
+    """规模治理。
+
+    ``total_rows`` 是**全部表的总行数上限**（默认 10 万）——
+    生成结果总行数超过它时直接拒绝，防止手一滑造出无法承载的数据量。
+    """
 
     max_rows: int = 100_000
+    total_rows: int = 100_000
     strategy: Strategy = "full"
     sample_size: int | None = None
     exclude: list[str] = Field(default_factory=list)

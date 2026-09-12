@@ -15,7 +15,7 @@ from __future__ import annotations
 import time
 from typing import Any, Callable
 
-from ..errors import PlanError
+from ..errors import GenerateError, PlanError
 from ..expr import build_functions
 from ..models import GenerateResult, SeedConfig, TableData
 from ..rng import SeededRandom
@@ -75,6 +75,17 @@ def generate_all(
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     result = GenerateResult(tables=tables, elapsed_ms=elapsed_ms, seed=config.seed)
+
+    # ---- 总行数上限：全部表之和超过 limits.total_rows 直接拒绝 ----
+    total = sum(len(data) for data in tables.values())
+    limit = config.limits.total_rows
+    if total > limit:
+        breakdown = ", ".join(f"{n} {len(d)}" for n, d in tables.items())
+        raise GenerateError(
+            f"总行数 {total} 超过上限 {limit}（{breakdown}）。"
+            f"请调大 limits.total_rows，或缩小各表的取值组 / 降低 max_rows",
+            "limits.total_rows",
+        )
 
     # ---- Phase 2：沿反向边把子表汇总回填到父表的 aggregate 组 ----
     if back_edges(config):
