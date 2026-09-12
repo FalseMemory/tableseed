@@ -129,6 +129,44 @@ def test_invalid_name_rejected(tmp_path):
         store.save("bad[name]", {"host": "h", "user": "u", "database": "d"})
 
 
+@allure.feature("数据库连接")
+@allure.story("特殊字符密码的保存与加载往返（% 曾炸掉 configparser）")
+def test_special_chars_roundtrip(tmp_path):
+    """密码带 % @ : / # # 空格 —— ini 读写必须无损（% 是 BasicInterpolation 的雷）。"""
+    store = ConnectionsStore(tmp_path / "config.ini")
+    fields = {
+        "type": "mysql", "host": "127.0.0.1", "port": 3306, "user": "root",
+        "password": "p%40ss:w/o rd#@1%2", "database": "db#1",
+        "charset": "utf8mb4",
+    }
+    store.save("dev-1_local", fields)
+
+    loaded = store.load()["connections"]["dev-1_local"]
+    assert loaded["password"] == "p%40ss:w/o rd#@1%2"   # % 没被插值、没丢
+    assert loaded["database"] == "db#1"
+
+    # 密码里的 % 在拼连接串时必须被编码成 %25，否则 URL 解析会错位
+    spec = DatabaseSpec.model_validate(loaded)
+    url = spec.resolved_url()
+    assert "p%2540ss" in url                            # % -> %25
+
+
+@allure.story("换行值被拒（ini 不支持跨行值）")
+def test_newline_value_rejected(tmp_path):
+    from tableseed.errors import TableSeedError
+
+    store = ConnectionsStore(tmp_path / "config.ini")
+    with pytest.raises(TableSeedError, match="换行"):
+        store.save("demo", {"host": "h", "user": "u", "database": "d", "password": "a\nb"})
+
+
+@allure.story("中文连接名可保存")
+def test_chinese_name(tmp_path):
+    store = ConnectionsStore(tmp_path / "config.ini")
+    store.save("本地演示", {"type": "mysql", "host": "h", "user": "u", "database": "d"})
+    assert "本地演示" in store.load()["connections"]
+
+
 @allure.story("第一个保存的连接自动成为当前连接")
 def test_first_connection_becomes_active(tmp_path):
     store = ConnectionsStore(tmp_path / "config.ini")

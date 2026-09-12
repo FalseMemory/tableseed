@@ -61,8 +61,13 @@ class ConnectionsStore:
     # ---------------------------------------------------------------- 读
 
     def load(self) -> dict[str, Any]:
-        """读取全部连接与当前激活名。文件不存在视为空。"""
-        parser = configparser.ConfigParser()
+        """读取全部连接与当前激活名。文件不存在视为空。
+
+        ``interpolation=None`` 必须显式关掉 —— 默认的 BasicInterpolation 会把
+        值里的 ``%`` 当插值语法，密码带 ``%`` 时读写直接抛异常（这是
+        "连接含特殊字符无法保存/加载"的根因）。
+        """
+        parser = configparser.ConfigParser(interpolation=None)
         parser.read(self.path, encoding="utf-8")
 
         active = None
@@ -105,11 +110,23 @@ class ConnectionsStore:
     def save(self, name: str, fields: dict[str, Any]) -> None:
         """新增或更新一个连接。非法连接名直接拒绝。"""
         name = (name or "").strip()
-        if not name or name == _GENERAL or any(ch in name for ch in "[]="):
-            raise TableSeedError(f"连接名不合法: {name!r}（不能为空、general 或包含 [] =）")
+        if not name or name == _GENERAL or any(ch in name for ch in "[]=\n"):
+            raise TableSeedError(f"连接名不合法: {name!r}（不能为空、general 或包含 [ ] = 及换行）")
+
+        cleaned: dict[str, Any] = {}
+        for k, v in fields.items():
+            if v in (None, ""):
+                continue
+            if isinstance(v, str) and ("\n" in v or "\r" in v):
+                raise TableSeedError(
+                    f"字段 {k} 含换行符 —— 连接信息不能跨行，请检查是否粘贴了多余内容"
+                )
+            cleaned[k] = v
+        if not cleaned.get("host") and not cleaned.get("url"):
+            raise TableSeedError("至少要填写 host（或直接给 url）")
 
         data = self.load()
-        data["connections"][name] = {k: v for k, v in fields.items() if v not in (None, "")}
+        data["connections"][name] = cleaned
         if not data["active"]:
             data["active"] = name  # 第一个连接自动成为当前连接
         self._write(data)
@@ -133,7 +150,7 @@ class ConnectionsStore:
     # ---------------------------------------------------------------- 内部
 
     def _write(self, data: dict[str, Any]) -> None:
-        parser = configparser.ConfigParser()
+        parser = configparser.ConfigParser(interpolation=None)  # 写侧同理：% 不能当插值语法
         parser[_GENERAL] = {_ACTIVE_KEY: data["active"] or ""}
         for name, fields in data["connections"].items():
             parser[name] = {k: str(v) for k, v in fields.items()}
