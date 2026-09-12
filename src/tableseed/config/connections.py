@@ -41,11 +41,31 @@ __all__ = [
 ]
 
 #: 项目根的连接配置文件
+def _normalize_config_path(path: str) -> str:
+    """规范配置文件路径：只允许项目根下的相对路径，拒绝绝对路径与越界。"""
+    from pathlib import Path as _P
+
+    clean = (path or "").strip().replace("\\", "/")
+    if not clean:
+        raise TableSeedError("文件路径不能为空")
+    if _P(clean).is_absolute() or ":" in clean:
+        raise TableSeedError(f"只支持项目根目录下的相对路径: {clean!r}")
+    p = _P(clean)
+    if ".." in p.parts:
+        raise TableSeedError(f"路径不能包含 .. 越出项目根: {clean!r}")
+    return str(p).replace("\\", "/")
+
+
 connections_path = Path("config.ini")
 
 #: 通用段（记录当前使用的连接名）
 _GENERAL = "general"
 _ACTIVE_KEY = "active"
+
+#: 工作区段（配置文件清单与当前文件）
+_WORKSPACE = "workspace"
+_ACTIVE_FILE_KEY = "active_file"
+_FILES_KEY = "files"
 
 #: 连接段允许的字段（与 DatabaseSpec 的结构化字段一致）
 _SPEC_FIELDS = ("type", "host", "port", "user", "password", "password_env",
@@ -146,6 +166,64 @@ class ConnectionsStore:
             raise TableSeedError(f"连接 {name!r} 不存在")
         data["active"] = name
         self._write(data)
+
+    # ---------------------------------------------------------------- 工作区（配置文件清单）
+
+    def get_workspace(self) -> dict[str, Any]:
+        """配置文件清单与当前文件。active 文件始终在清单首位。"""
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.read(self.path, encoding="utf-8")
+        files: list[str] = []
+        if parser.has_section(_WORKSPACE):
+            raw = parser[_WORKSPACE].get(_FILES_KEY, "")
+            files = [f.strip() for f in raw.splitlines() if f.strip()]
+        active = None
+        if parser.has_section(_WORKSPACE):
+            active = parser[_WORKSPACE].get(_ACTIVE_FILE_KEY) or None
+        if active and active not in files:
+            files.insert(0, active)
+        return {"active": active, "files": files}
+
+    def add_file(self, path: str) -> None:
+        """把一个配置文件加入清单（已存在则忽略），不改变当前文件。"""
+        clean = _normalize_config_path(path)
+        data = self.get_workspace()
+        if clean not in data["files"]:
+            data["files"].append(clean)
+        self._write_workspace(data)
+
+    def set_active_file(self, path: str) -> None:
+        clean = _normalize_config_path(path)
+        data = self.get_workspace()
+        if clean not in data["files"]:
+            data["files"].append(clean)
+        data["active"] = clean
+        self._write_workspace(data)
+
+    def remove_file(self, path: str) -> None:
+        clean = _normalize_config_path(path)
+        data = self.get_workspace()
+        data["files"] = [f for f in data["files"] if f != clean]
+        if data["active"] == clean:
+            data["active"] = data["files"][0] if data["files"] else None
+        self._write_workspace(data)
+
+    def _write_workspace(self, data: dict[str, Any]) -> None:
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.read(self.path, encoding="utf-8")
+        if not parser.has_section(_GENERAL):
+            parser[_GENERAL] = {}
+        if data.get("active") and parser.has_section(_GENERAL):
+            pass  # 连接的 active 由 ConnectionsStore 管理，这里不动
+        parser[_WORKSPACE] = {
+            _ACTIVE_FILE_KEY: data.get("active") or "",
+            _FILES_KEY: "\n".join(data.get("files") or []),
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as f:
+            parser.write(f)
+        tmp.replace(self.path)
 
     # ---------------------------------------------------------------- 内部
 

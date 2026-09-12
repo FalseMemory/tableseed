@@ -182,6 +182,32 @@ class AppState:
                 stale.unlink(missing_ok=True)
         source.write_text(text, encoding="utf-8")
 
+    def switch_to(self, path: str) -> str:
+        """切换到另一个配置文件（路径经 config.ini 的清单规范校验）。"""
+        from ..config.connections import _normalize_config_path  # noqa: PLC0415
+
+        clean = _normalize_config_path(path)
+        source = Path(clean)
+        if not source.exists():
+            raise TableSeedError(f"配置文件不存在: {clean}")
+        self.config_path = clean
+        self.text = source.read_text(encoding="utf-8")
+        self.inserted_fingerprint = None  # 换了文件，插入指纹随之失效
+        return clean
+
+    def save_as(self, path: str, text: str) -> str:
+        """另存为：当前配置写入新文件并切换绑定。"""
+        from ..config.connections import _normalize_config_path  # noqa: PLC0415
+
+        clean = _normalize_config_path(path)
+        target = Path(clean)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        self.config_path = clean
+        self.text = text
+        self.inserted_fingerprint = None
+        return clean
+
     def parse(self, text: str) -> SeedConfig:
         return service.load_text(text, source=self.config_path or "<webui>")
 
@@ -333,6 +359,59 @@ def create_app(config_path: str | None = None) -> FastAPI:
         except TableSeedError as exc:
             problems = [str(exc)]
         return {"yaml": text, "problems": problems}
+
+    # ---------------------------------------------------------- 配置文件工作区（多文件）
+
+    @app.get("/api/workspace")
+    def get_workspace() -> dict[str, Any]:
+        """配置文件清单与当前文件（清单存在 config.ini 的 workspace 段）。"""
+        from ..config.connections import ConnectionsStore  # noqa: PLC0415
+
+        data = ConnectionsStore().get_workspace()
+        files = [{"path": f, "exists": Path(f).exists()} for f in data["files"]]
+        active = data["active"] or state.config_path
+        return {"active": active, "files": files}
+
+    @app.post("/api/workspace/switch")
+    def switch_workspace(payload: dict[str, Any]) -> dict[str, Any]:
+        """切换到清单里的另一个配置文件（服务随之载入该文件）。"""
+        from ..config.connections import ConnectionsStore  # noqa: PLC0415
+
+        path = payload.get("path") or ""
+        try:
+            clean = state.switch_to(path)
+            ConnectionsStore().set_active_file(clean)
+        except TableSeedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        state.log_operation("切换配置", f"当前配置文件 → {clean}")
+        return {"ok": True, "path": clean, "text": state.text}
+
+    @app.post("/api/workspace/save-as")
+    def save_as_workspace(payload: dict[str, Any]) -> dict[str, Any]:
+        """另存为：当前左栏配置写入新文件，加入清单并切换绑定。"""
+        from ..config.connections import ConnectionsStore  # noqa: PLC0415
+
+        path = payload.get("path") or ""
+        text = payload.get("text")
+        if text is None:
+            text = state.text
+        try:
+            clean = state.save_as(path, text)
+            ConnectionsStore().set_active_file(clean)
+        except TableSeedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        state.log_operation("另存为", f"配置另存为 {clean}")
+        return {"ok": True, "path": clean, "text": state.text}
+
+    @app.post("/api/workspace/remove")
+    def remove_workspace_file(payload: dict[str, Any]) -> dict[str, Any]:
+        """把文件移出清单（不删除磁盘文件）。"""
+        from ..config.connections import ConnectionsStore  # noqa: PLC0415
+
+        path = payload.get("path") or ""
+        ConnectionsStore().remove_file(path)
+        state.log_operation("移除配置", f"{path} 移出清单（文件保留）")
+        return {"ok": True}
 
     # ---------------------------------------------------------- 配置编辑器
 

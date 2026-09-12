@@ -175,6 +175,14 @@
       <span class="chip" id="write-chip">只读查询</span>
     </div>
 
+    <!-- 配置文件工作区：多文件切换 + 另存为 -->
+    <div class="row" style="padding:8px 16px;border-bottom:1px solid var(--line);flex:none">
+      <span class="hint">文件</span>
+      <select id="cfg-file-select" style="flex:1;min-width:0"><option value="">— 选择配置文件 —</option></select>
+      <button id="btn-cfg-saveas" title="把当前配置另存为新文件">另存为</button>
+      <button id="btn-cfg-remove" title="从清单移除（文件保留）">移除</button>
+    </div>
+
     <!-- 数据库连接：config.ini 多连接，全局共用（SQL 台、造数入库、建表语句都走这里） -->
     <div class="db-panel">
       <div class="db-head" id="db-toggle">
@@ -387,6 +395,7 @@ function tableHtml(columns, rows) {
 
 async function boot() {
   loadDatabase();   // 先把配置里的连接信息回填到表单
+  loadWorkspace();  // 配置文件清单（多文件切换）
   try {
     const cfg = await api("/api/config");
     $("yaml").value = cfg.text;
@@ -968,6 +977,73 @@ async function runVerify() {
   }
 }
 
+// ---------------------------------------------------------------- 配置文件工作区
+
+async function loadWorkspace() {
+  try {
+    const ws = await api("/api/workspace");
+    const select = $("cfg-file-select");
+    select.innerHTML = '<option value="">— 选择配置文件 —</option>'
+      + ws.files.map((f) =>
+        `<option value="${escapeHtml(f.path)}">${escapeHtml(f.path)}${f.exists ? "" : "（不存在）"}${f.path === ws.active ? " ✓" : ""}</option>`).join("");
+    if (ws.active) select.value = ws.active;
+    $("cfg-path").textContent = ws.active || "未绑定文件（仅内存）";
+  } catch (e) { /* 工作区读取失败不打断启动 */ }
+}
+
+async function switchConfigFile(path) {
+  try {
+    const res = await api("/api/workspace/switch", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    });
+    $("yaml").value = res.text;
+    $("cfg-path").textContent = res.path;
+    $("cfg-file-select").value = res.path;
+    await validate(true);
+    setStatus(`已切换到 ${res.path}`);
+  } catch (e) {
+    setStatus("切换失败：" + e.message);
+  }
+}
+
+function showSaveAsDialog() {
+  $("saveas-path").value = "";
+  $("saveas-dialog").showModal();
+  $("saveas-path").focus();
+}
+
+async function doSaveAs() {
+  const path = $("saveas-path").value.trim();
+  if (!path) { $("saveas-path").focus(); return; }
+  try {
+    const res = await api("/api/workspace/save-as", {
+      method: "POST",
+      body: JSON.stringify({ path, text: $("yaml").value }),
+    });
+    $("saveas-dialog").close();
+    $("cfg-path").textContent = res.path;
+    await loadWorkspace();
+    $("cfg-file-select").value = res.path;
+    setStatus(`已另存为 ${res.path}`);
+  } catch (e) {
+    $("saveas-error").textContent = e.message;
+  }
+}
+
+async function removeConfigFile() {
+  const path = $("cfg-file-select").value;
+  if (!path) return;
+  if (!confirm(`把 ${path} 从清单移除？（磁盘文件保留）`)) return;
+  try {
+    await api("/api/workspace/remove", { method: "POST", body: JSON.stringify({ path }) });
+    await loadWorkspace();
+    setStatus(`已移出清单：${path}`);
+  } catch (e) {
+    setStatus("移除失败：" + e.message);
+  }
+}
+
 // ---------------------------------------------------------------- 数据库连接
 
 const DB_DEFAULT_PORT = { mysql: 3306, postgresql: 5432, oracle: 1521 };
@@ -1332,6 +1408,15 @@ $("btn-logs-clear").addEventListener("click", async () => {
   } catch (e) { $("logs-body").innerHTML = msg("err", e.message); }
 });
 
+// 配置文件工作区
+$("btn-cfg-saveas").addEventListener("click", showSaveAsDialog);
+$("btn-cfg-remove").addEventListener("click", removeConfigFile);
+$("cfg-file-select").addEventListener("change", (e) => {
+  if (e.target.value) switchConfigFile(e.target.value);
+});
+$("btn-saveas-confirm").addEventListener("click", doSaveAs);
+$("saveas-path").addEventListener("keydown", (e) => { if (e.key === "Enter") doSaveAs(); });
+
 boot();
 
 // ---- 单元格编辑器事件（textarea 是静态元素，只绑一次）----
@@ -1354,6 +1439,19 @@ $("cell-editor-collapse").addEventListener("click", () => {
     <button onclick="this.closest('dialog').close()">关闭</button>
   </div>
   <pre id="log-dialog-content" style="white-space:pre-wrap;word-break:break-all;font-size:12.5px;line-height:1.6;margin:0"></pre>
+</dialog>
+<dialog id="saveas-dialog" style="max-width:560px">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+    <b style="font-size:15px">另存配置文件</b>
+    <span class="spacer"></span>
+    <button onclick="this.closest('dialog').close()">取消</button>
+  </div>
+  <div class="hint" style="margin-bottom:6px">项目根目录下的相对路径，如 <code>samples/my.yaml</code> 或 <code>configs/prod.yaml</code></div>
+  <input type="text" id="saveas-path" placeholder="路径/文件名.yaml" style="width:100%">
+  <div class="hint" id="saveas-error" style="color:var(--err);margin-top:6px"></div>
+  <div style="text-align:right;margin-top:12px">
+    <button class="primary" id="btn-saveas-confirm">保存</button>
+  </div>
 </dialog>
 <dialog id="help-dialog" style="max-width:820px;max-height:80vh;overflow:auto">
   <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
