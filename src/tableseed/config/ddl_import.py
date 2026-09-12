@@ -15,6 +15,7 @@
 | 列特征                   | 生成的组                          |
 +--------------------------+----------------------------------+
 | 主键 / _no / _id 后缀    | sequence（自增编号）              |
+| 只有 1 条样例（非主键）  | const（单值无推断空间，不猜）     |
 | 样例值全部相同           | const                             |
 | 样例 distinct ≤ 8        | enum（取值来自样例）              |
 | decimal(p,s)             | random decimal（范围按样例扩缩）  |
@@ -109,8 +110,10 @@ def parse_create_table(ddl: str) -> tuple[str, list[Column]]:
         comment = re.search(r"COMMENT\s+'((?:[^']|'')*)'", rest, re.IGNORECASE)
         if comment:
             column.comment = comment.group(1).replace("''", "'")
-        if re.search(r"\bAUTO_INCREMENT\b", rest, re.IGNORECASE):
-            column.primary_key = True
+        if re.search(r"\bAUTO_INCREMENT\b", rest, re.IGNORECASE) or re.search(
+            r"\bPRIMARY\s+KEY\b", rest, re.IGNORECASE
+        ):
+            column.primary_key = True  # AUTO_INCREMENT 或列内联 PRIMARY KEY
         columns.append(column)
 
     for column in columns:
@@ -273,6 +276,10 @@ def _infer_type(column: Column) -> str:
     """推断一列该用哪种组 —— 判断只有这一处，渲染与统计共用，避免漂移。
 
     返回 sequence / const / enum / random 之一。
+
+    规则：**只有 1 条样例（非主键）时一律 const** —— 一个值没有任何推断空间，
+    猜 enum/random 都是编造；只有多条 INSERT 时才值得自动判断类型。
+    主键除外：单值 const 会让主键全部相同，必然冲突，维持 sequence。
     """
     base_type = (column.type_raw or "").lower()
     samples = [v for v in column.samples if v is not None]
@@ -283,8 +290,8 @@ def _infer_type(column: Column) -> str:
     # 主键必须唯一 —— 无论样例多少都用 sequence
     if column.primary_key or (is_id_like and not samples):
         return "sequence"
-    # 样例值完全一致 → const
-    if samples and len(set(map(str, samples))) == 1:
+    # 只有 1 条样例（或样例值完全一致）→ const，不猜
+    if len(samples) == 1 or (samples and len(set(map(str, samples))) == 1):
         return "const"
     # 数值与日期：类型优先于取值枚举（金额不该被样例限死成 enum）
     if re.match(r"^(decimal|numeric|number|int|bigint|smallint|tinyint|integer)", base_type):

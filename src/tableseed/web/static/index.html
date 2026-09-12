@@ -673,7 +673,7 @@ function showEditorHelp() {
     ["dict", "from", "取值来自父表某列的 distinct 值（from: 父列名）"],
     ["sequence", "start / format", "自增编号。start 起始数字；format 模板如 \"TXN{seq:06d}\"（{seq} 为占位符）。不填 format 则输出纯数字"],
     ["random", "generator + range", "generator 选生成器：int（整数）、decimal（小数，scale 定小数位）、choice（从 values 里随机）、date（日期区间）、string（随机串，range=[最小,最大] 长度）。range 是取值范围如 [0,1000]"],
-    ["const", "value", "固定值，JSON 数组且与字段数一致：[\"0001\"]（两字段则 [\"0001\",\"001\"]）"],
+    ["const", "value", "固定值，单字段直接写内容（如 0001），多字段用 JSON 数组（值个数与字段数一致）：[\"0001\",\"001\"]"],
     ["derive", "expr", "表达式计算，可引用本行字段与 parent.*（父行字段）：\"balance * 0.01\""],
     ["ref", "from", "引用父表字段（from: 父列名），值照抄"],
     ["aggregate", "from + expr", "反向汇总（子表 → 父表），expr 用聚合函数：\"sum(net_amount)\" / \"count()\""],
@@ -714,7 +714,7 @@ function renderEditor() {
          <span style="width:200px">字段（逗号分隔）</span><span>取值 / 参数</span>
        </div>`
     + rows
-    + '<div class="hint" style="margin-top:10px">取值/参数按类型填：enum 的 values 用 JSON 数组（如 [["01","正常"],["02","冻结"]]）；random 的 range 如 [0,1000]；const 的 value 如 ["0001"]。点击任意输入框，下方会出现大编辑区；关系与不变量请回左栏 YAML 编辑。</div>';
+    + '<div class="hint" style="margin-top:10px">取值/参数按类型填：单值直接写内容本身（如 01、0001），多值用 JSON 数组（如 [["01","正常"],["02","冻结"]]）；random 的 range 如 [0,1000]。点击任意输入框，下方会出现大编辑区；关系与不变量请回左栏 YAML 编辑。</div>';
   bindEditor();
   attachCellEditor();
 }
@@ -741,7 +741,7 @@ function openCellEditor(input) {
 function editorRowHtml(g, gi) {
   const keys = GROUP_KEYS[g.type] || [];
   const params = keys.map((k) => {
-    const val = g[k] === undefined ? "" : (typeof g[k] === "string" ? g[k] : JSON.stringify(g[k]));
+    const val = displayParam(k, g[k]);
     return `<input type="text" class="ed-param" data-gi="${gi}" data-key="${k}"
       value="${escapeHtml(val)}" placeholder="${k}" style="min-width:150px">`;
   }).join(" ");
@@ -775,7 +775,7 @@ function bindEditor() {
     document.querySelectorAll(`.ed-param[data-gi="${gi}"]`).forEach((input) => {
       input.addEventListener("change", () => {
         const key = input.dataset.key;
-        g[key] = parseMaybeJson(input.value);
+        g[key] = parseParam(key, input.value);
       });
     });
     document.querySelector(`.ed-del[data-gi="${gi}"]`).addEventListener("click", () => {
@@ -792,6 +792,45 @@ function parseMaybeJson(text) {
     try { return JSON.parse(t); } catch (e) { return text; }
   }
   return text;
+}
+
+// ---- 取值参数的显示与解析：单值去掉中括号和引号（裸值），多值仍是 JSON ----
+
+function displayParam(key, val) {
+  if (val === undefined) return "";
+  if (key === "value" && Array.isArray(val) && val.length === 1 && !Array.isArray(val[0])) {
+    return String(val[0]);                       // const 单字段：["0001"] → 0001
+  }
+  if (key === "values" && Array.isArray(val) && val.length === 1
+      && Array.isArray(val[0]) && val[0].length === 1) {
+    return String(val[0][0]);                    // enum 单组单值：[["01"]] → 01
+  }
+  return typeof val === "string" ? val : JSON.stringify(val);
+}
+
+function smartScalar(text) {
+  // 裸值解析：数字-looking 的转数字，但保留前导零的字符串（账号 0001 ≠ 1）
+  if (/^-?\d+$/.test(text) && !/^0\d/.test(text)) return parseInt(text, 10);
+  if (/^-?\d+\.\d+$/.test(text)) return parseFloat(text);
+  return text;
+}
+
+function parseParam(key, text) {
+  const t = text.trim();
+  if (!t) return key === "value" ? [] : [];
+  if (t.startsWith("[")) {
+    const parsed = parseMaybeJson(t);
+    // enum 宽松写法：一层数组 ["a","b"] → 每项包一层 [["a"],["b"]]
+    if (key === "values" && Array.isArray(parsed) && parsed.some((v) => !Array.isArray(v))) {
+      return parsed.map((v) => [v]);
+    }
+    return parsed;
+  }
+  // 裸值（用户按提示只填了内容本身）→ 按组类型包回模型要求的结构
+  const scalar = smartScalar(t);
+  if (key === "value") return [scalar];           // const
+  if (key === "values") return [[scalar]];        // enum / boundary
+  return parseMaybeJson(t);                       // 其余参数（range 等）维持原逻辑
 }
 
 async function saveEditor() {
