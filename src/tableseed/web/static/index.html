@@ -122,6 +122,10 @@
   .db-msg.err { color: var(--err); border-color: rgba(248,81,73,.35); background: rgba(248,81,73,.08); }
   .db-msg ul { margin: 4px 0 0; padding-left: 16px; }
   .log-detail-btn { padding: 2px 8px; font-size: 11px; margin-left: 4px; }
+  .cell-editor {
+    border-top: 1px solid var(--line); padding: 10px 16px;
+    background: var(--panel); flex: none;
+  }
   dialog {
     background: var(--panel); color: var(--text); border: 1px solid var(--line);
     border-radius: 10px; padding: 18px 20px; box-shadow: 0 8px 40px rgba(0,0,0,.5);
@@ -250,6 +254,16 @@
         <button class="primary" id="btn-editor-save">保存并校验</button>
       </div>
       <div id="editor-body"><div class="empty">点击「⟳ 加载左侧配置」读取当前 YAML。</div></div>
+      <!-- 单元格编辑器：点击任意取值/参数输入框后在此编辑长内容（Navicat 风格） -->
+      <div id="cell-editor" class="cell-editor" hidden>
+        <div class="row" style="margin-bottom:6px">
+          <span class="hint" id="cell-editor-label"></span>
+          <span class="spacer"></span>
+          <button id="cell-editor-collapse">收起</button>
+        </div>
+        <textarea id="cell-editor-text" class="sqlbox" style="height:110px" spellcheck="false"
+          placeholder="点击上方任意「取值 / 参数」或「字段」输入框后，在这里编辑长内容（实时回写）"></textarea>
+      </div>
       <div id="editor-out"></div>
     </div>
 
@@ -691,8 +705,28 @@ function renderEditor() {
          <span style="width:200px">字段（逗号分隔）</span><span>取值 / 参数</span>
        </div>`
     + rows
-    + '<div class="hint" style="margin-top:10px">取值/参数按类型填：enum 的 values 用 JSON 数组（如 [["01","正常"],["02","冻结"]]）；random 的 range 如 [0,1000]；const 的 value 如 ["0001"]。关系与不变量请回左栏 YAML 编辑。</div>';
+    + '<div class="hint" style="margin-top:10px">取值/参数按类型填：enum 的 values 用 JSON 数组（如 [["01","正常"],["02","冻结"]]）；random 的 range 如 [0,1000]；const 的 value 如 ["0001"]。点击任意输入框，下方会出现大编辑区；关系与不变量请回左栏 YAML 编辑。</div>';
   bindEditor();
+  attachCellEditor();
+}
+
+// ---- 单元格编辑器：长内容在下方大编辑区里改，实时回写原输入框 ----
+let cellTarget = null;
+
+function attachCellEditor() {
+  document.querySelectorAll("#editor-body .ed-param, #editor-body .ed-fields").forEach((input) => {
+    input.addEventListener("focus", () => openCellEditor(input));
+  });
+}
+
+function openCellEditor(input) {
+  cellTarget = input;
+  const key = input.dataset.key;
+  const gi = input.dataset.gi !== undefined ? `第 ${+input.dataset.gi + 1} 组 · ` : "";
+  $("cell-editor-label").textContent =
+    `正在编辑：${gi}${key ? key : "字段列表"}`;
+  $("cell-editor-text").value = input.value;
+  $("cell-editor").hidden = false;
 }
 
 function editorRowHtml(g, gi) {
@@ -1005,8 +1039,13 @@ async function loadDatabase() {
     const names = Object.keys(d.connections);
     select.innerHTML = '<option value="">— 选择已有连接 —</option>'
       + names.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}${n === d.active ? " ✓" : ""}</option>`).join("");
-    if (d.active) select.value = d.active;
-    dbStatus(names.length ? `${names.length} 个连接，当前：${d.active}` : "未配置（可在 config.ini 保存多个连接）");
+    if (d.active) {
+      select.value = d.active;
+      applyConnection(d.active);   // 首次打开自动回填激活连接的表单，不用再手动切一次
+      dbStatus(`${names.length} 个连接，当前：${d.active}`, "on");
+    } else {
+      dbStatus(names.length ? "未选择连接" : "未配置（可在 config.ini 保存多个连接）");
+    }
   } catch (e) {
     dbStatus("读取失败");
   }
@@ -1197,11 +1236,11 @@ async function loadLogs() {
     const rows = res.logs.map((l) => {
       const short = l.detail.length > TRUNC ? l.detail.slice(0, TRUNC) + "…" : l.detail;
       const viewBtn = l.detail.length > TRUNC
-        ? ` <button class="log-detail-btn" data-full="${escapeHtml(l.detail)}" data-meta="${escapeHtml(`[${l.time}] ${l.kind}`)}" data-ok="${l.ok ? "成功" : "失败"}">详情</button>` : "";
+        ? ` <button class="log-detail-btn" data-i="${res.logs.indexOf(l)}">详情</button>` : "";
       return `<tr>
         <td>${escapeHtml(l.time)}</td>
         <td>${escapeHtml(l.kind)}</td>
-        <td style="max-width:480px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+        <td style="word-break:break-all">
           ${escapeHtml(short)}${viewBtn}
         </td>
         <td>${escapeHtml(l.ok ? "成功" : "失败")}</td>
@@ -1211,17 +1250,18 @@ async function loadLogs() {
         <th>时间</th><th>操作</th><th style="min-width:320px">详情</th><th>结果</th>
       </tr></thead><tbody>${rows}</tbody></table>`;
     renderPager(res);
-    bindLogDetail();
+    bindLogDetail(res.logs);
   } catch (e) {
     body.innerHTML = msg("err", e.message);
   }
 }
 
-function bindLogDetail() {
+function bindLogDetail(logs) {
   document.querySelectorAll(".log-detail-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
+      const log = logs[+btn.dataset.i];
       $("log-dialog-content").textContent =
-        `${btn.dataset.meta}\n${btn.dataset.full}\n结果: ${btn.dataset.ok}`;
+        `[${log.time}] ${log.kind}\n${log.detail}\n结果: ${log.ok ? "成功" : "失败"}`;
       $("log-dialog").showModal();
     });
   });
@@ -1249,7 +1289,7 @@ $("btn-sql-ddl").addEventListener("click", fetchDDL);
 $("btn-editor-save").addEventListener("click", saveEditor);
 $("btn-editor-load").addEventListener("click", loadEditorFromLeft);
 $("btn-editor-help").addEventListener("click", showEditorHelp);
-$("btn-logs-refresh").addEventListener("click", loadLogs);
+$("btn-logs-refresh").addEventListener("click", () => { logsState.page = 1; loadLogs(); });
 $("btn-db-save").addEventListener("click", saveConnection);
 $("btn-db-delete").addEventListener("click", deleteConnection);
 $("btn-db-test").addEventListener("click", testDatabase);
@@ -1293,6 +1333,19 @@ $("btn-logs-clear").addEventListener("click", async () => {
 });
 
 boot();
+
+// ---- 单元格编辑器事件（textarea 是静态元素，只绑一次）----
+$("cell-editor-text").addEventListener("input", () => {
+  if (cellTarget) {
+    cellTarget.value = $("cell-editor-text").value;
+    cellTarget.dispatchEvent(new Event("change"));
+  }
+});
+$("cell-editor-collapse").addEventListener("click", () => {
+  $("cell-editor").hidden = true;
+  cellTarget = null;
+});
+
 </script>
 <dialog id="help-dialog" style="max-width:820px;max-height:80vh;overflow:auto">
   <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
