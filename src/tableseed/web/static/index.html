@@ -376,12 +376,13 @@
           <input type="text" id="db-charset" placeholder="字符集 utf8mb4">
         </div>
         <div class="db-msg" id="db-msg" hidden></div>
-        <div class="db-foot">
-          <span class="hint" id="db-config-path" title="连接信息的存放文件（config.ini）"></span>
-          <span class="hint" id="db-masked"></span>
+        <div class="db-foot" style="flex-wrap:wrap">
+          <span class="hint" id="db-masked" style="width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono);font-size:11.5px"></span>
+          <span class="hint" id="db-config-path" title="连接信息的存放文件（config.ini）"
+                style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px"></span>
           <span class="spacer"></span>
           <button id="btn-db-delete">删除</button>
-          <button id="btn-db-save">保存连接</button>
+          <button id="btn-db-save" class="primary" style="padding:4px 12px;font-size:12px">保存连接</button>
         </div>
       </div>
     </div>
