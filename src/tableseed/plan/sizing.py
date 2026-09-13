@@ -36,11 +36,16 @@ def plan_tables(config: SeedConfig) -> PlanResult:
 
         if relation is None:
             # ---- 根表：每父行基数 = 策略展开的行数 ----
-            base, note = _per_parent_base(config, finite, combos, note)
+            base, note = _per_parent_base(config, finite, combos, note, table=table)
+            if base == 0:
+                # 无有限组又没声明 rows：生成阶段会直接报错，提前说清楚
+                warnings.append(
+                    f"tables[{name}]: 没有有限取值组也没有声明 rows —— 生成时会报错"
+                )
             planned = _cap(config, table, base, name, warnings)
         elif relation.cardinality in {"1:1", "1:0..1"}:
             # ---- 1:1：行数跟随父表，有限组只做分配 ----
-            base, _ = _per_parent_base(config, finite, combos, note)
+            base, _ = _per_parent_base(config, finite, combos, note, table=table)
             parent_rows = planned_rows.get(relation.parent, 0)
             planned = min(parent_rows, config.limits.max_rows)
             if combos > parent_rows:
@@ -54,7 +59,9 @@ def plan_tables(config: SeedConfig) -> PlanResult:
         else:
             # ---- 1:N：行数 = 父行数 × 每父行基数 ----
             parent_rows = planned_rows.get(relation.parent, 0)
-            base, note = _per_parent_base(config, finite, combos, note, relation)
+            base, note = _per_parent_base(
+                config, finite, combos, note, relation, table=table
+            )
             planned = _cap(config, table, parent_rows * max(base, 1), name, warnings)
             if combos and not note:
                 note = f"1:N 展开：父表 {parent_rows} 行 × {combos} 组合"
@@ -88,8 +95,14 @@ def _per_parent_base(
     combos: int,
     note: str | None,
     relation=None,
+    table=None,
 ) -> tuple[int, str | None]:
-    """每父行的展开基数：split > sample > pairwise > full（笛卡尔积）。"""
+    """每父行的展开基数：split > 无有限组 > sample > pairwise > full（笛卡尔积）。
+
+    **无有限取值组时必须与生成侧保持一致**（table_gen.py）：
+    空笛卡尔积的数学结果是 1，但生成侧对这类"全为逐行组"的表**用 rows 声明当行数**。
+    plan 若还按 combos=1 算，就会出现"预演 1 行、实际生成 100 行"的分歧。
+    """
     strategy = config.limits.strategy
 
     # split 传播决定每父行份数（此时子表无有限组，combos = 0）
@@ -98,6 +111,16 @@ def _per_parent_base(
         if split_rule is not None:
             per = split_rule.parts or (len(split_rule.ratio) if split_rule.ratio else 1)
             return per, f"split 拆分：每条父行拆 {per} 份"
+
+    if not finite:
+        if relation is None:
+            # 根表：行数由 rows 声明给出（table_gen 对无有限组的表就是这么做的）
+            declared = (getattr(table, "rows", 0) or 0)
+            if declared:
+                return declared, f"全为逐行组，行数按 rows: {declared} 声明"
+            return 0, "没有有限取值组也没有声明 rows —— 生成时会直接报错"
+        # 子表：无有限组时每父行 1 行
+        return 1, note
 
     if strategy == "sample" and combos:
         base = min(config.limits.sample_size or 10, combos)

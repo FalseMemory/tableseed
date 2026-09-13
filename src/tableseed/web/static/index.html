@@ -682,7 +682,9 @@ async function runPlan() {
     const rows = plan.tables.map((t) => ({
       "表": t.table,
       "有限取值组": t.finite_groups.join(" × ") || "-",
-      "组合数": t.combo_count,
+      // 无有限取值组时组合数（空积=1）没有意义，显示 - 更诚实；
+      // 行数由 rows 声明决定，备注里会写明
+      "组合数": t.finite_groups.length ? t.combo_count : "-",
       "计划行数": t.planned_rows,
       "备注": t.note || "",
     }));

@@ -35,6 +35,10 @@ _CN: dict[str, str] = {
     "finite_number": "应为有限数字（不能是 NaN / Infinity）",
     "json_invalid": "JSON 写法有误",
     "literal_error": "取值不在允许范围内",
+    "model_type": "结构写法不对 —— 应写成映射（key: value）而不是列表",
+    "is_instance_of": "结构写法不对 —— 应为该字段要求的对象/数组形式",
+    "is_type": "类型不对",
+    "list_type_no_item": "应为数组",
 }
 
 #: yaml 常见报错 → 中文提示（模式匹配）
@@ -68,6 +72,8 @@ def explain_validation(exc: ValidationError) -> str:
                 desc += f"（最少 {ctx['min_length']} 个字符）"
             if etype == "string_too_long" and "max_length" in ctx:
                 desc += f"（最多 {ctx['max_length']} 个字符）"
+            if etype in ("model_type", "is_instance_of") and "class_name" in ctx:
+                desc += f"（期望结构：{ctx['class_name']}）"
         lines.append(f"{loc}: {desc}")
     return "配置校验失败：\n  - " + "\n  - ".join(lines)
 
