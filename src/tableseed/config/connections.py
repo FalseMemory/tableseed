@@ -222,8 +222,7 @@ class ConnectionsStore:
 
     def get_workspace(self) -> dict[str, Any]:
         """配置文件清单与当前文件。active 文件始终在清单首位。"""
-        parser = configparser.ConfigParser(interpolation=None)
-        parser.read(self.path, encoding="utf-8")
+        parser = self._parser()
         files: list[str] = []
         if parser.has_section(_WORKSPACE):
             raw = parser[_WORKSPACE].get(_FILES_KEY, "")
@@ -234,6 +233,10 @@ class ConnectionsStore:
         if active and active not in files:
             files.insert(0, active)
         return {"active": active, "files": files}
+
+    def workspace_initialized(self) -> bool:
+        """清单是否被初始化过 —— 用来区分「从未管理」与「用户主动清空」。"""
+        return self._parser().has_section(_WORKSPACE)
 
     def add_file(self, path: str) -> None:
         """把一个配置文件加入清单（已存在则忽略），不改变当前文件。"""

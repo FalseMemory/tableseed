@@ -47,7 +47,39 @@ def test_workspace_roundtrip(tmp_path, monkeypatch):
     assert "seed: 1" in client.get("/api/config").json()["text"]
 
 
-@allure.story("切换到清单外但不存在的文件被拒")
+@allure.story("首次启动：-c 指定的配置自动纳入清单（清单不至于空）")
+def test_first_run_adds_current_config(tmp_path, monkeypatch):
+    """回归：服务用 -c samples/txn.yaml 启动，但清单是空的 ——
+    用户看到的就是"我保存过的 YAML 文件都不见了"。"""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "samples").mkdir()
+    (tmp_path / "samples" / "txn.yaml").write_text(CONFIG, encoding="utf-8")
+
+    client = TestClient(create_app(config_path="samples/txn.yaml"))
+    ws = client.get("/api/workspace").json()
+    assert [f["path"] for f in ws["files"]] == ["samples/txn.yaml"]
+    assert ws["active"] == "samples/txn.yaml"
+    # 落盘了：重启（新建 app 实例）后仍在
+    client2 = TestClient(create_app(config_path="samples/txn.yaml"))
+    assert [f["path"] for f in client2.get("/api/workspace").json()["files"]] == ["samples/txn.yaml"]
+
+
+@allure.story("用户清空过清单后，不再自动加回（否则移除永远无效）")
+def test_user_cleared_list_stays_cleared(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "samples").mkdir()
+    (tmp_path / "samples" / "a.yaml").write_text(CONFIG, encoding="utf-8")
+
+    client = TestClient(create_app(config_path="samples/a.yaml"))
+    assert len(client.get("/api/workspace").json()["files"]) == 1
+    client.post("/api/workspace/remove", json={"path": "samples/a.yaml"})
+
+    ws = client.get("/api/workspace").json()
+    assert [f["path"] for f in ws["files"]] == []          # 移除生效，不被加回
+    assert (tmp_path / "samples/a.yaml").exists()          # 磁盘文件保留
+
+
+@allure.story("连接到不存在的文件：400")
 def test_switch_missing_file_rejected(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     client = TestClient(create_app())

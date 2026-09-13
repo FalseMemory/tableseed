@@ -397,10 +397,23 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     @app.get("/api/workspace")
     def get_workspace() -> dict[str, Any]:
-        """配置文件清单与当前文件（清单存在 config.ini 的 workspace 段）。"""
-        from ..config.connections import ConnectionsStore  # noqa: PLC0415
+        """配置文件清单与当前文件（清单存在 config.ini 的 workspace 段）。
 
-        data = ConnectionsStore().get_workspace()
+        服务启动时 `-c` 指定的配置文件会**自动纳入清单** ——
+        否则清单可能是空的，用户看到的就是"我保存过的 YAML 文件都不见了"。
+        """
+        from ..config.connections import ConnectionsStore, _normalize_config_path  # noqa: PLC0415
+
+        store = ConnectionsStore()
+        # 从未初始化过清单（config.ini 里没有 workspace 段）→ 把服务启动时
+        # -c 指定的配置自动纳入，避免用户看到"我保存过的 YAML 都不见了"。
+        # 用户主动清空过清单则尊重其意图，不自动加回（否则"移除"永远无效）。
+        if not store.workspace_initialized() and state.config_path:
+            try:
+                store.add_file(_normalize_config_path(state.config_path))
+            except TableSeedError:
+                pass
+        data = store.get_workspace()
         files = [{"path": f, "exists": Path(f).exists()} for f in data["files"]]
         active = data["active"] or state.config_path
         return {"active": active, "files": files}
