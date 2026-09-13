@@ -17,7 +17,7 @@ import pathlib
 import re
 import subprocess
 import sys
-import tempfile
+import time
 import urllib.request
 
 BROWSERS = [
@@ -35,15 +35,18 @@ def find_browser() -> str | None:
 
 
 def dump_dom(browser: str, url: str, budget_ms: int = 6000) -> str:
-    with tempfile.TemporaryDirectory() as tmp:
-        out = pathlib.Path(tmp) / "dom.html"
-        with out.open("w", encoding="utf-8") as fh:
-            subprocess.run(
-                [browser, "--headless=new", "--disable-gpu", "--no-proxy-server",
-                 f"--virtual-time-budget={budget_ms}", "--dump-dom", url],
-                stdout=fh, stderr=subprocess.DEVNULL, timeout=120,
-            )
-        return out.read_text(encoding="utf-8", errors="replace")
+    # 用固定文件而非 TemporaryDirectory：Chrome 子进程退出有延迟，
+    # Windows 会锁住刚写完的文件，临时目录清理会抛 PermissionError
+    out = pathlib.Path(".tmp") / "verify-dom.html"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", encoding="utf-8") as fh:
+        subprocess.run(
+            [browser, "--headless=new", "--disable-gpu", "--no-proxy-server",
+             f"--virtual-time-budget={budget_ms}", "--dump-dom", url],
+            stdout=fh, stderr=subprocess.DEVNULL, timeout=120,
+        )
+    time.sleep(0.3)  # 等 Chrome 完全释放文件句柄
+    return out.read_text(encoding="utf-8", errors="replace")
 
 
 def screenshot(browser: str, url: str, dest: str) -> None:

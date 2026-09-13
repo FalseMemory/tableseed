@@ -109,19 +109,20 @@ def test_primary_key_always_sequence():
 
 @allure.story("无样例的纯 DDL 草稿自动声明 rows 行数")
 def test_ddl_only_draft_declares_rows():
-    """没有 INSERT 样例时字段全是逐行组 —— 必须补 rows，否则配置一拿就报错。"""
+    """没有 INSERT 样例时字段全是逐行组 —— 必须补 rows，否则配置一拿就报错。
+    默认 1 行（保守起点），要造更多行时用户自行调大。"""
     from tableseed.config.ddl_import import generate_yaml
 
     text = generate_yaml(
         "CREATE TABLE t_x (id bigint NOT NULL, acct_no varchar(32), "
         "balance decimal(18,2), PRIMARY KEY (id));"
     )
-    assert "rows:" in text
+    assert "rows: 1" in text
 
     config = service.load_text(text)
     assert service.check(config) == []
     result = service.generate(config)
-    assert len(result.tables["t_x"]) == 100  # rows: 100
+    assert len(result.tables["t_x"]) == 1  # rows: 1
 
 
 # ---------------------------------------------------------------- 结构化编辑

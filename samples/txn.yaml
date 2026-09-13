@@ -1,308 +1,54 @@
+# 由建表语句与 INSERT 样例自动生成 —— 字段分组为草稿, 请按需调整
+# 表: t_txn  生成时间标记见 seed
 seed: 20260910
+
 limits:
-  max_rows: 100000
-  total_rows: 100000
-  strategy: full
-tables:
-- name: t_txn
-  groups:
-  - name: g_txn_type
-    type: enum
-    fields:
-    - txn_type
-    - txn_type_desc
-    values:
-    - - T
-      - 转账
-    - - D
-      - 存款
-    - - W
-      - 取款
-    allocation: follow_parent
-    start: 1
-    step: 1
-  - name: g_channel
-    type: enum
-    fields:
-    - channel
-    values:
-    - - OTC
-    - - EBANK
-    - - MOBILE
-    allocation: follow_parent
-    start: 1
-    step: 1
-  - name: g_txn_no
-    type: sequence
-    fields:
-    - txn_no
-    allocation: follow_parent
-    start: 10000
-    step: 1
-    format: TXNasddzx{seq:08d}
-  - name: g_currency
-    type: random
-    fields:
-    - currency
-    values:
-    - - CNY
-    - - USD
-    - - HKD
-    allocation: follow_parent
-    start: 1
-    step: 1
-    generator: choice
-  - name: g_amount
-    type: random
-    fields:
-    - amount
-    allocation: follow_parent
-    start: 1
-    step: 1
-    generator: weighted_int
-    range:
-    - 100
-    - 1000000
-    buckets:
-    - 0.7
-    - 0.2
-    - 0.1
-  - name: g_tenant
-    type: const
-    fields:
-    - tenant_id
-    allocation: follow_parent
-    start: 1
-    step: 1
-    value:
-    - '0001'
-  - name: g_fee
-    type: derive
-    fields:
-    - fee
-    allocation: follow_parent
-    start: 1
-    step: 1
-    expr: round(amount * 0.001, 2)
-  - name: g_detail_sum
-    type: aggregate
-    fields:
-    - detail_amount_sum
-    allocation: follow_parent
-    start: 1
-    step: 1
-    expr: sum(net_amount)
-    from: t_txn_detail
-  - name: g_log_count
-    type: aggregate
-    fields:
-    - log_count
-    allocation: follow_parent
-    start: 1
-    step: 1
-    expr: count()
-    from: t_txn_log
-  columns:
-  - name: txn_no
-    nullable: true
-    primary_key: false
-  - name: txn_type
-    nullable: true
-    primary_key: false
-  - name: txn_type_desc
-    nullable: true
-    primary_key: false
-  - name: channel
-    nullable: true
-    primary_key: false
-  - name: currency
-    nullable: true
-    primary_key: false
-  - name: amount
-    nullable: true
-    primary_key: false
-  - name: fee
-    nullable: true
-    primary_key: false
-  - name: tenant_id
-    nullable: true
-    primary_key: false
-  - name: detail_amount_sum
-    nullable: true
-    primary_key: false
-  - name: log_count
-    nullable: true
-    primary_key: false
-  scope: per_parent
-- name: t_txn_detail
-  groups:
-  - name: g_settle
-    type: enum
-    fields:
-    - settle_status
-    - settle_status_desc
-    values:
-    - - S0
-      - 未清算
-    - - S1
-      - 已清算
-    - - S2
-      - 清算失败
-    allocation: follow_parent
-    start: 1
-    step: 1
-  - name: g_remark
-    type: random
-    fields:
-    - remark
-    values:
-    - - 系统自动
-    - - 柜员录入
-    allocation: follow_parent
-    start: 1
-    step: 1
-    generator: choice
-  columns:
-  - name: txn_no
-    nullable: true
-    primary_key: false
-  - name: currency
-    nullable: true
-    primary_key: false
-  - name: detail_type
-    nullable: true
-    primary_key: false
-  - name: settle_status
-    nullable: true
-    primary_key: false
-  - name: settle_status_desc
-    nullable: true
-    primary_key: false
-  - name: net_amount
-    nullable: true
-    primary_key: false
-  - name: remark
-    nullable: true
-    primary_key: false
-  scope: per_parent
-- name: t_txn_item
-  groups:
-  - name: g_memo
-    type: const
-    fields:
-    - memo
-    allocation: follow_parent
-    start: 1
-    step: 1
-    value:
-    - 记账分录
-  columns:
-  - name: txn_no
-    nullable: true
-    primary_key: false
-  - name: item_amt
-    nullable: true
-    primary_key: false
-  - name: memo
-    nullable: true
-    primary_key: false
-  scope: per_parent
-- name: t_txn_log
-  groups:
-  - name: g_step
-    type: enum
-    fields:
-    - step
-    - step_desc
-    values:
-    - - '10'
-      - 受理
-    - - '20'
-      - 复核
-    - - '30'
-      - 记账
-    allocation: follow_parent
-    start: 1
-    step: 1
-  - name: g_operator
-    type: const
-    fields:
-    - operator
-    allocation: follow_parent
-    start: 1
-    step: 1
-    value:
-    - AUTO
-  columns:
-  - name: txn_no
-    nullable: true
-    primary_key: false
-  - name: step
-    nullable: true
-    primary_key: false
-  - name: step_desc
-    nullable: true
-    primary_key: false
-  - name: operator
-    nullable: true
-    primary_key: false
-  scope: per_parent
-relations:
-- parent: t_txn
-  child: t_txn_detail
-  cardinality: '1:1'
-  existence: required
-  join:
-  - parent_field: txn_no
-    child_field: txn_no
-  propagate:
-  - mode: copy
-    to: currency
-    from: currency
-  - mode: map
-    to: detail_type
-    from: txn_type
-    mapping:
-      T: TRANSFER
-      D: DEPOSIT
-      W: WITHDRAW
-  - mode: derive
-    to: net_amount
-    expr: parent.amount - parent.fee
-  drive_by:
-  - txn_type
-- parent: t_txn
-  child: t_txn_log
-  cardinality: 1:N
-  existence: required
-  join:
-  - parent_field: txn_no
-    child_field: txn_no
-- parent: t_txn
-  child: t_txn_item
-  cardinality: 1:N
-  existence: required
-  join:
-  - parent_field: txn_no
-    child_field: txn_no
-  propagate:
-  - mode: split
-    to: item_amt
-    from: amount
-    parts: 2
-invariants:
-- table: t_txn
-  expr: fee <= amount
-- table: t_txn
-  from: t_txn_detail
-  expr: sum(net_amount) = amount - fee
-- table: t_txn
-  from: t_txn_log
-  expr: count() = 3
-- table: t_txn
-  from: t_txn_item
-  expr: sum(item_amt) = amount
-sql:
-  allow_write: false
   max_rows: 1000
-  timeout_seconds: 30
+  strategy: full
+
+tables:
+  - name: t_txn
+    rows: 1   # 全为逐行组, 行数按此声明
+    groups:
+      - type: sequence
+        name: g_txn_no
+        fields: [txn_no]
+        start: 1
+        format: "txn_no_{seq:06d}"
+      - type: const
+        name: g_txn_type
+        fields: [txn_type]
+        value: ["Q"]
+      - type: const
+        name: g_txn_type_desc
+        fields: [txn_type_desc]
+        value: [""]
+      - type: const
+        name: g_channel
+        fields: [channel]
+        value: ["OTC"]
+      - type: const
+        name: g_currency
+        fields: [currency]
+        value: ["HKD"]
+      - type: const
+        name: g_amount
+        fields: [amount]
+        value: [1491714.43]
+      - type: const
+        name: g_fee
+        fields: [fee]
+        value: [1568.63]
+      - type: const
+        name: g_tenant_id
+        fields: [tenant_id]
+        value: ["0001"]
+      - type: const
+        name: g_detail_amount_sum
+        fields: [detail_amount_sum]
+        value: [1241563.68]
+      - type: random
+        name: g_log_count
+        fields: [log_count]
+        generator: int
+        range: [0, 1000]

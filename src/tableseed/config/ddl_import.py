@@ -256,10 +256,18 @@ def generate_yaml(
     for column in columns:
         body.extend(_group_lines(column, table_name, used_names, used_types))
 
-    # 没有任何有限取值组（字段全是 random / sequence / derive）→ 笛卡尔积无从展开，
-    # 必须显式声明行数，否则配置一拿就报错
+    # 没有任何有限取值组（字段全是 random / sequence / const / derive）→
+    # 笛卡尔积无从展开，行数必须显式声明。
+    # 默认值取**样例条数**（1 条 INSERT 样例 → 1 行）——
+    # 曾经硬编码 100，导致"我给了一条样例却造出 100 行"的落差。
+    # 想造更多行时，用户把这个值调大即可。
     if not (used_types & {"enum", "boundary", "dict"}):
-        head.append("    rows: 100   # 全为逐行组, 行数按此声明")
+        sample_rows = max((len(v) for v in samples.values()), default=0)
+        default_rows = max(sample_rows, 1)
+        head.append(
+            f"    rows: {default_rows}"
+            f"   # 全为逐行组, 行数按此声明（当前 {default_rows} 行, 要更多改这个数）"
+        )
 
     lines = [*head, "    groups:", *body]
     return "\n".join(lines) + "\n"
