@@ -413,6 +413,46 @@ def test_connections_response_shape(tmp_path, monkeypatch):
     assert body["has_usable"] is True
 
 
+# ---------------------------------------------------------------- 保存的健壮性
+
+
+@allure.feature("配置保存")
+@allure.story("清理旧备份失败绝不能拖垮保存（曾把服务进程杀掉）")
+def test_persist_survives_unlink_failure(tmp_path, monkeypatch):
+    """回归：persist() 清理旧备份时 unlink 抛 SystemExit（安全策略拦删除），
+    SystemExit 继承 BaseException，普通 except Exception 抓不到 → 逃逸到
+    uvicorn → 整个服务进程退出。用户点一下"保存配置"服务就没了。
+    """
+    monkeypatch.chdir(tmp_path)
+    from pathlib import Path
+
+    (tmp_path / "samples").mkdir()
+    cfg = tmp_path / "samples" / "t.yaml"
+    cfg.write_text("seed: 1\ntables: []\n", encoding="utf-8")
+
+    client = TestClient(create_app(config_path="samples/t.yaml"))
+
+    # 造出超过 10 份的旧备份，触发清理分支
+    backup_dir = tmp_path / ".tmp" / "config-backup"
+    backup_dir.mkdir(parents=True)
+    for i in range(15):
+        (backup_dir / f"t-20260101-0000{i:02d}.yaml").write_text("x", encoding="utf-8")
+
+    # 让删除动作像沙箱那样抛 SystemExit
+    real_unlink = Path.unlink
+
+    def boom(self, *args, **kwargs):  # noqa: ANN001
+        if self.parent == backup_dir:
+            raise SystemExit(1)
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", boom)
+
+    res = client.put("/api/config", json={"text": "seed: 2\ntables: []\n"})
+    assert res.status_code == 200, "删除失败不能影响保存"
+    assert "seed: 2" in cfg.read_text(encoding="utf-8")
+
+
 @allure.story("SQL 查询回落到 config.ini 的激活连接")
 def test_query_falls_back_to_ini_connection(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)

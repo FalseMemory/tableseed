@@ -169,6 +169,13 @@ class AppState:
 
         写前先备份到 ``.tmp/config-backup/``（保留最近 10 份）——
         保存类操作是覆盖写，一旦写坏没有备份就无法恢复。
+
+        注意：**清理旧备份必须吃掉一切异常（含 BaseException）**。
+        删除动作在某些环境里会被安全策略拦下（抛出的是 SystemExit，
+        继承自 BaseException —— 普通 except Exception 抓不到），
+        一旦逃逸就会把整个服务进程杀掉：用户点一下"保存配置"，
+        服务就没了，页面所有请求失败，看起来像"数据全丢了"。
+        备份多留几份只是占空间，崩溃是完全不可接受的。
         """
         import shutil
         import time as _time  # noqa: PLC0415
@@ -177,13 +184,19 @@ class AppState:
             return
         source = Path(self.config_path)
         if source.exists():
-            backup_dir = Path(".tmp/config-backup")
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            stamp = _time.strftime("%Y%m%d-%H%M%S")
-            shutil.copy2(source, backup_dir / f"{source.stem}-{stamp}{source.suffix}")
-            backups = sorted(backup_dir.glob(f"{source.stem}-*{source.suffix}"))
-            for stale in backups[:-10]:
-                stale.unlink(missing_ok=True)
+            try:
+                backup_dir = Path(".tmp/config-backup")
+                backup_dir.mkdir(parents=True, exist_ok=True)
+                stamp = _time.strftime("%Y%m%d-%H%M%S")
+                shutil.copy2(source, backup_dir / f"{source.stem}-{stamp}{source.suffix}")
+                backups = sorted(backup_dir.glob(f"{source.stem}-*{source.suffix}"))
+                for stale in backups[:-10]:
+                    try:
+                        stale.unlink(missing_ok=True)
+                    except BaseException:  # noqa: BLE001 - 删不掉就留着，绝不中断保存
+                        break
+            except BaseException:  # noqa: BLE001 - 备份是尽力而为，不能影响保存
+                pass
         source.write_text(text, encoding="utf-8")
 
     def switch_to(self, path: str) -> str:

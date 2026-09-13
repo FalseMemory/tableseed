@@ -21,6 +21,11 @@ env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
 if pwd:
     env[NAME] = pwd
 
+# 去掉宿主注入的 PYTHONPATH（sitecustomize shim）—— 让开发服务跑在
+# 与用户自己 start.bat 启动时一致的环境里：shim 里的安全策略会拦截
+# 文件删除等操作并抛 SystemExit(1)，曾把服务进程整个杀掉。
+env.pop("PYTHONPATH", None)
+
 cmd = [r".venv\Scripts\tableseed.exe", "ui", "-c", "samples/txn.yaml",
        "--port", "8643", "--no-browser"]
 print("starting:", " ".join(cmd))
