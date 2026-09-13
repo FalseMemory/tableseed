@@ -505,7 +505,63 @@
   </section>
 </main>
 
+<dialog id="log-dialog" style="max-width:760px">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+    <b style="font-size:15px">操作详情</b>
+    <span class="spacer"></span>
+    <button onclick="this.closest('dialog').close()">关闭</button>
+  </div>
+  <pre id="log-dialog-content" style="white-space:pre-wrap;word-break:break-all;font-size:12.5px;line-height:1.6;margin:0"></pre>
+</dialog>
+<dialog id="saveas-dialog" style="max-width:560px">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+    <b style="font-size:15px">另存配置文件</b>
+    <span class="spacer"></span>
+    <button onclick="this.closest('dialog').close()">取消</button>
+  </div>
+  <div class="hint" style="margin-bottom:6px">项目根目录下的相对路径，如 <code>samples/my.yaml</code> 或 <code>configs/prod.yaml</code></div>
+  <input type="text" id="saveas-path" placeholder="路径/文件名.yaml" style="width:100%">
+  <div class="hint" id="saveas-error" style="color:var(--err);margin-top:6px"></div>
+  <div style="text-align:right;margin-top:12px">
+    <button class="primary" id="btn-saveas-confirm">保存</button>
+  </div>
+</dialog>
+<dialog id="help-dialog" style="max-width:820px;max-height:80vh;overflow:auto">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+    <b style="font-size:15px">配置编辑器帮助 —— 组类型与取值/参数设置</b>
+    <span class="spacer"></span>
+    <button onclick="this.closest('dialog').close()">关闭</button>
+  </div>
+  <div id="help-dialog-content"></div>
+</dialog>
+
 <script>
+// ---------------------------------------------------------------- 启动安全网
+// 顶层事件绑定一律走 on()：元素不存在时只告警，绝不中断脚本 ——
+// 曾经 $("btn-saveas-confirm").addEventListener(...) 因该元素定义在
+// 脚本结束标签之后而拿到 null 抛错，导致后面的 boot() 从未执行、整页空白。
+const on = (id, ev, fn) => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener(ev, fn);
+  else console.warn("[tableseed] 缺少元素，跳过绑定:", id);
+};
+
+// 前端任何未捕获错误都显示在页面顶部 —— 出问题一眼可见，不用猜
+window.addEventListener("error", (e) => {
+  let bar = document.getElementById("err-bar");
+  if (!bar) {
+    bar = document.createElement("div");
+    bar.id = "err-bar";
+    bar.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:9999;"
+      + "background:#7f1d1d;color:#fff;padding:8px 14px;font:12px/1.5 monospace;"
+      + "white-space:pre-wrap;box-shadow:0 2px 12px rgba(0,0,0,.5)";
+    document.body.appendChild(bar);
+  }
+  bar.textContent = "前端脚本错误：" + (e.message || e.error)
+    + "（" + (e.filename || "").split("/").pop() + ":" + e.lineno + "）"
+    + " —— 请把这条提示截图反馈";
+});
+
 const $ = (id) => document.getElementById(id);
 const state = { result: null, dsn: null };
 
@@ -1597,32 +1653,32 @@ function renderPager(res) {
 document.querySelectorAll(".tabs button").forEach((b) => {
   b.addEventListener("click", () => switchTab(b.dataset.tab));
 });
-$("btn-validate").addEventListener("click", () => validate(false));
-$("btn-plan").addEventListener("click", runPlan);
-$("btn-gen").addEventListener("click", runGenerate);
-$("btn-save").addEventListener("click", saveConfig);
-$("btn-sql").addEventListener("click", runSql);
-$("btn-verify").addEventListener("click", runVerify);
-$("btn-import").addEventListener("click", runImport);
-$("btn-sql-ddl").addEventListener("click", fetchDDL);
-$("btn-editor-save").addEventListener("click", saveEditor);
-$("btn-editor-load").addEventListener("click", loadEditorFromLeft);
-$("btn-editor-help").addEventListener("click", showEditorHelp);
-$("btn-logs-refresh").addEventListener("click", () => { logsState.page = 1; loadLogs(); });
-$("btn-db-save").addEventListener("click", saveConnection);
-$("btn-db-delete").addEventListener("click", deleteConnection);
-$("btn-db-test").addEventListener("click", testDatabase);
-$("btn-db-apply").addEventListener("click", () => {
+on("btn-validate", "click", () => validate(false));
+on("btn-plan", "click", runPlan);
+on("btn-gen", "click", runGenerate);
+on("btn-save", "click", saveConfig);
+on("btn-sql", "click", runSql);
+on("btn-verify", "click", runVerify);
+on("btn-import", "click", runImport);
+on("btn-sql-ddl", "click", fetchDDL);
+on("btn-editor-save", "click", saveEditor);
+on("btn-editor-load", "click", loadEditorFromLeft);
+on("btn-editor-help", "click", showEditorHelp);
+on("btn-logs-refresh", "click", () => { logsState.page = 1; loadLogs(); });
+on("btn-db-save", "click", saveConnection);
+on("btn-db-delete", "click", deleteConnection);
+on("btn-db-test", "click", testDatabase);
+on("btn-db-apply", "click", () => {
   const name = $("db-conn-select").value;
   if (!name) { dbMessage("err", "请先在下拉中选择连接"); return; }
   switchConnection(name);
 });
-$("db-conn-select").addEventListener("change", (e) => {
+on("db-conn-select", "change", (e) => {
   if (e.target.value) switchConnection(e.target.value);   // 选中即切换（含回填）
 });
 
 // 折叠 / 展开数据库连接面板（点面板上的按钮不触发）
-$("db-toggle").addEventListener("click", (e) => {
+on("db-toggle", "click", (e) => {
   if (e.target.closest("button")) return;
   const body = $("db-body");
   body.hidden = !body.hidden;
@@ -1630,18 +1686,18 @@ $("db-toggle").addEventListener("click", (e) => {
 });
 
 // 切换类型时自动带出该类型的默认端口
-$("db-type").addEventListener("change", (e) => {
+on("db-type", "change", (e) => {
   if (!$("db-port").value) $("db-port").value = DB_DEFAULT_PORT[e.target.value] || "";
 });
 
-$("btn-logs-refresh").addEventListener("click", () => { logsState.page = 1; loadLogs(); });
-$("btn-logs-query").addEventListener("click", () => { logsState.page = 1; loadLogs(); });
-$("logs-kind").addEventListener("change", () => { logsState.page = 1; loadLogs(); });
-$("logs-ok").addEventListener("change", () => { logsState.page = 1; loadLogs(); });
-$("logs-q").addEventListener("keydown", (e) => { if (e.key === "Enter") { logsState.page = 1; loadLogs(); } });
-$("logs-prev").addEventListener("click", () => { if (logsState.page > 1) { logsState.page--; loadLogs(); } });
-$("logs-next").addEventListener("click", () => { if (logsState.page < logsState.pages) { logsState.page++; loadLogs(); } });
-$("btn-logs-clear").addEventListener("click", async () => {
+on("btn-logs-refresh", "click", () => { logsState.page = 1; loadLogs(); });
+on("btn-logs-query", "click", () => { logsState.page = 1; loadLogs(); });
+on("logs-kind", "change", () => { logsState.page = 1; loadLogs(); });
+on("logs-ok", "change", () => { logsState.page = 1; loadLogs(); });
+on("logs-q", "keydown", (e) => { if (e.key === "Enter") { logsState.page = 1; loadLogs(); } });
+on("logs-prev", "click", () => { if (logsState.page > 1) { logsState.page--; loadLogs(); } });
+on("logs-next", "click", () => { if (logsState.page < logsState.pages) { logsState.page++; loadLogs(); } });
+on("btn-logs-clear", "click", async () => {
   if (!confirm("确定清空全部操作日志？此操作不可恢复。")) return;
   try {
     await api("/api/logs/clear", { method: "POST", body: "{}" });
@@ -1652,57 +1708,28 @@ $("btn-logs-clear").addEventListener("click", async () => {
 });
 
 // 配置文件工作区
-$("btn-cfg-saveas").addEventListener("click", showSaveAsDialog);
-$("btn-cfg-remove").addEventListener("click", removeConfigFile);
-$("cfg-file-select").addEventListener("change", (e) => {
+on("btn-cfg-saveas", "click", showSaveAsDialog);
+on("btn-cfg-remove", "click", removeConfigFile);
+on("cfg-file-select", "change", (e) => {
   if (e.target.value) switchConfigFile(e.target.value);
 });
-$("btn-saveas-confirm").addEventListener("click", doSaveAs);
-$("saveas-path").addEventListener("keydown", (e) => { if (e.key === "Enter") doSaveAs(); });
+on("btn-saveas-confirm", "click", doSaveAs);
+on("saveas-path", "keydown", (e) => { if (e.key === "Enter") doSaveAs(); });
 
 boot();
 
 // ---- 单元格编辑器事件（textarea 是静态元素，只绑一次）----
-$("cell-editor-text").addEventListener("input", () => {
+on("cell-editor-text", "input", () => {
   if (cellTarget) {
     cellTarget.value = $("cell-editor-text").value;
     cellTarget.dispatchEvent(new Event("change"));
   }
 });
-$("cell-editor-collapse").addEventListener("click", () => {
+on("cell-editor-collapse", "click", () => {
   $("cell-editor").hidden = true;
   cellTarget = null;
 });
 
 </script>
-<dialog id="log-dialog" style="max-width:760px">
-  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-    <b style="font-size:15px">操作详情</b>
-    <span class="spacer"></span>
-    <button onclick="this.closest('dialog').close()">关闭</button>
-  </div>
-  <pre id="log-dialog-content" style="white-space:pre-wrap;word-break:break-all;font-size:12.5px;line-height:1.6;margin:0"></pre>
-</dialog>
-<dialog id="saveas-dialog" style="max-width:560px">
-  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-    <b style="font-size:15px">另存配置文件</b>
-    <span class="spacer"></span>
-    <button onclick="this.closest('dialog').close()">取消</button>
-  </div>
-  <div class="hint" style="margin-bottom:6px">项目根目录下的相对路径，如 <code>samples/my.yaml</code> 或 <code>configs/prod.yaml</code></div>
-  <input type="text" id="saveas-path" placeholder="路径/文件名.yaml" style="width:100%">
-  <div class="hint" id="saveas-error" style="color:var(--err);margin-top:6px"></div>
-  <div style="text-align:right;margin-top:12px">
-    <button class="primary" id="btn-saveas-confirm">保存</button>
-  </div>
-</dialog>
-<dialog id="help-dialog" style="max-width:820px;max-height:80vh;overflow:auto">
-  <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-    <b style="font-size:15px">配置编辑器帮助 —— 组类型与取值/参数设置</b>
-    <span class="spacer"></span>
-    <button onclick="this.closest('dialog').close()">关闭</button>
-  </div>
-  <div id="help-dialog-content"></div>
-</dialog>
 </body>
 </html>
