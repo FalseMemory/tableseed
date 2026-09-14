@@ -537,6 +537,26 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     # ---------------------------------------------------------- 配置编辑器
 
+    @app.post("/api/config/reload")
+    def reload_config() -> dict[str, Any]:
+        """从磁盘重新载入当前配置文件。
+
+        为什么需要：配置文件可能被服务之外的东西改动（git checkout、外部编辑器、
+        自动化脚本）。服务内存里保有一份副本，不同步就会出现"文件明明是干净的、
+        页面却还报旧错误"的错位。点一下这个按钮即回到磁盘真实内容。
+        """
+        if not state.config_path:
+            raise HTTPException(status_code=400, detail="当前没有绑定配置文件（仅内存模式）")
+        source = Path(state.config_path)
+        if not source.exists():
+            raise HTTPException(status_code=400, detail=f"配置文件不存在: {state.config_path}")
+        try:
+            clean = state.switch_to(state.config_path)
+        except TableSeedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        state.log_operation("重载配置", f"从磁盘重新载入 {clean}")
+        return {"ok": True, "path": clean, "text": state.text}
+
     @app.get("/api/config/structured")
     def get_structured() -> dict[str, Any]:
         """当前配置的编辑视图（供表格化编辑）。"""

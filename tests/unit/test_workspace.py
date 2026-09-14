@@ -47,6 +47,38 @@ def test_workspace_roundtrip(tmp_path, monkeypatch):
     assert "seed: 1" in client.get("/api/config").json()["text"]
 
 
+@allure.story("从磁盘重载：文件被外部改动后一键同步到服务")
+def test_reload_from_disk(tmp_path, monkeypatch):
+    """回归：验证脚本 / git / 外部编辑器改了文件，服务内存还是旧副本 ——
+    页面就会拿旧配置报错（"文件明明是干净的，页面却还报旧问题"）。
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "samples").mkdir()
+    target = tmp_path / "samples" / "r.yaml"
+    target.write_text(CONFIG, encoding="utf-8")
+
+    client = TestClient(create_app(config_path="samples/r.yaml"))
+    assert "t_a" in client.get("/api/config").json()["text"]
+
+    # 绕过服务直接在磁盘上改（模拟 git checkout / 外部编辑器）
+    target.write_text(CONFIG.replace("t_a", "t_renamed"), encoding="utf-8")
+    assert "t_renamed" not in client.get("/api/config").json()["text"]   # 内存还是旧的
+
+    res = client.post("/api/config/reload", json={})
+    assert res.status_code == 200
+    assert "t_renamed" in res.json()["text"]
+    assert "t_renamed" in client.get("/api/config").json()["text"]       # 已同步
+
+
+@allure.story("没有绑定文件时重载给出明确提示")
+def test_reload_without_bound_file(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(create_app())
+    res = client.post("/api/config/reload", json={})
+    assert res.status_code == 400
+    assert "没有绑定" in res.json()["detail"]
+
+
 @allure.story("首次启动：-c 指定的配置自动纳入清单（清单不至于空）")
 def test_first_run_adds_current_config(tmp_path, monkeypatch):
     """回归：服务用 -c samples/txn.yaml 启动，但清单是空的 ——

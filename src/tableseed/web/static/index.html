@@ -336,10 +336,11 @@
       <span class="chip" id="write-chip">只读查询</span>
     </div>
 
-    <!-- 配置文件工作区：多文件切换 + 另存为 -->
+    <!-- 配置文件工作区：多文件切换 + 另存为 + 从磁盘重载 -->
     <div class="row" style="padding:8px 16px;border-bottom:1px solid var(--line);flex:none">
       <span class="hint">文件</span>
       <select id="cfg-file-select" style="flex:1;min-width:0"><option value="">— 选择配置文件 —</option></select>
+      <button id="btn-cfg-reload" title="文件被外部改动（git / 编辑器）后，把磁盘内容重新读进来">⟳ 重载</button>
       <button id="btn-cfg-saveas" title="把当前配置另存为新文件">另存为</button>
       <button id="btn-cfg-remove" title="从清单移除（文件保留）">移除</button>
     </div>
@@ -1356,6 +1357,18 @@ async function loadWorkspace() {
   } catch (e) { /* 工作区读取失败不打断启动 */ }
 }
 
+async function reloadConfigFile() {
+  try {
+    const res = await api("/api/config/reload", { method: "POST", body: "{}" });
+    $("yaml").value = res.text;
+    $("cfg-path").textContent = res.path;
+    await validate(true);
+    setStatus(`已从磁盘重载 ${res.path}`);
+  } catch (e) {
+    setStatus("重载失败：" + e.message);
+  }
+}
+
 async function switchConfigFile(path) {
   try {
     const res = await api("/api/workspace/switch", {
@@ -1869,6 +1882,7 @@ on("btn-logs-clear", "click", async () => {
 });
 
 // 配置文件工作区
+on("btn-cfg-reload", "click", reloadConfigFile);
 on("btn-cfg-saveas", "click", showSaveAsDialog);
 on("btn-cfg-remove", "click", removeConfigFile);
 on("cfg-file-select", "change", (e) => {
