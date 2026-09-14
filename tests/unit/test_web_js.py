@@ -47,7 +47,8 @@ def _extract(html: str) -> tuple[str, set[str], int]:
 #: 运行时由 JS 动态插入的元素，不在静态 DOM 里
 DYNAMIC_IDS = {
     "btn-sql-insert", "btn-ins-to-imp", "btn-ddl-to-imp", "btn-imp-gen",
-    "btn-imp-plan", "btn-confirm-insert", "insert-out", "insert-hint",
+    "btn-imp-plan", "btn-confirm-insert", "btn-gen-insert-sql",
+    "insert-out", "insert-hint",
     "prog", "sql-prev", "sql-next", "ed-table", "ed-add-group",
     "err-bar", "log-dialog", "log-dialog-content", "saveas-dialog",
     "saveas-path", "saveas-error", "btn-saveas-confirm",
@@ -81,7 +82,8 @@ def test_top_level_bindings_are_safe():
 
 
 @allure.story("用桩 DOM 真跑脚本：启动流程必须执行到发请求")
-def test_script_boots_with_stub_dom():
+def _run_harness(post_js: str = "") -> dict:
+    """跑一次页面脚本（桩 DOM），返回 {ok, fetched, ...}。"""
     node = _node()
     if node is None:
         pytest.skip("未找到 node，跳过前端冒烟")
@@ -165,8 +167,15 @@ process.on("unhandledRejection", (e) => {
   process.exit(1);
 });
 
-// ---- 断言启动流程跑到了 ----
-setTimeout(() => {
+// ---- 后置检查（可选：测试可传入一段代码在此执行）----
+setTimeout(async () => {
+  try {
+    __POSTJS__
+  } catch (e) {
+    console.log(JSON.stringify({ ok: false, reason: "后置检查异常: " + e.message,
+      stack: String(e.stack || "").split("\\n").slice(0, 4) }));
+    process.exit(1);
+  }
   const boot = fetched.filter((u) => u.includes("/api/") && !u.includes("_t="));
   if (fetched.length === 0) {
     console.log(JSON.stringify({ ok: false, reason: "脚本执行后没有任何请求 —— boot() 没有运行", fetched }));
@@ -177,7 +186,11 @@ setTimeout(() => {
 }, 300);
 """
 
-    harness = harness.replace("__IDS__", json.dumps(sorted(ids))).replace("__JS__", js)
+    harness = (
+        harness.replace("__IDS__", json.dumps(sorted(ids)))
+        .replace("__JS__", js)
+        .replace("__POSTJS__", post_js)
+    )
 
     with tempfile.TemporaryDirectory() as tmp:
         script = Path(tmp) / "harness.js"
@@ -195,8 +208,76 @@ setTimeout(() => {
             break
         except json.JSONDecodeError:
             continue
+    if payload.get("ok") is not True:
+        payload["_raw_stdout"] = (proc.stdout or "")[-1500:]
+        payload["_raw_stderr"] = (proc.stderr or "")[-1500:]
+    return payload
 
+
+@allure.story("用桩 DOM 真跑脚本：启动流程必须执行到发请求")
+def test_script_boots_with_stub_dom():
+    payload = _run_harness()
     assert payload.get("ok") is True, (
         "前端启动流程未跑通：\n"
-        f"stdout={proc.stdout[-1500:]}\nstderr={proc.stderr[-1500:]}"
+        f"stdout={payload.get('_raw_stdout')}\nstderr={payload.get('_raw_stderr')}\n"
+        f"reason={payload.get('reason')}"
+    )
+
+
+@allure.story("结果页：点击生成后出现「生成 INSERT 语句」按钮并可点击")
+def test_insert_sql_button_rendered():
+    """离线场景的入口必须在结果页真正渲染出来，且点击能触发渲染请求。
+
+    桩 fetch 返回一份假结果 → 调 runGenerate() → 检查 tab-result 的 HTML
+    里出现按钮，且按钮已绑定 click（桩 DOM 会记录 handler）。
+    """
+    post_js = """
+    // 假结果：一张表两行
+    global.fetch = async (url) => {
+      fetched.push(String(url));
+      const isGen = String(url).includes("/api/generate");
+      return {
+        ok: true, status: 200, headers: { get: () => null },
+        text: async () => JSON.stringify(isGen ? {
+          tables: { t_txn: { count: 2, columns: ["txn_no"], rows: [["T0001"], ["T0002"]],
+                             truncated: false } },
+          elapsed_ms: 3, seed: 1, sink: "内存模式", warnings: [], invariant_failures: [],
+        } : { ok: true, text: "seed: 1\\ntables: []\\n", path: "x.yaml" }),
+        json: async () => ({}),
+        body: { getReader: () => ({ read: async () => ({ done: true }) }) },
+      };
+    };
+    // 生成走的是 SSE 流，这里直接调渲染函数验证按钮落地
+    renderResult({
+      tables: { t_txn: { count: 2, columns: ["txn_no"], rows: [["T0001"], ["T0002"]],
+                         truncated: false } },
+      elapsed_ms: 3, seed: 1, sink: "内存模式", warnings: [], invariant_failures: [],
+    });
+    const html = store["tab-result"].innerHTML;
+    if (!html.includes('id="btn-gen-insert-sql"')) {
+      console.log(JSON.stringify({ ok: false, reason: "结果页没有渲染出「生成 INSERT 语句」按钮" }));
+      process.exit(1);
+    }
+    const btn = store["btn-gen-insert-sql"];
+    if (!btn || !btn._h || !btn._h.click) {
+      console.log(JSON.stringify({ ok: false, reason: "「生成 INSERT 语句」按钮没有绑定 click" }));
+      process.exit(1);
+    }
+    // 点击它应弹出 SQL 弹窗并发起渲染请求
+    const before = fetched.length;
+    btn._h.click();
+    await new Promise((r) => setTimeout(r, 200));
+    if (!store["sqlgen-dialog"] || store["sqlgen-dialog"].showModal === undefined) {
+      console.log(JSON.stringify({ ok: false, reason: "SQL 弹窗不存在" }));
+      process.exit(1);
+    }
+    if (fetched.length <= before) {
+      console.log(JSON.stringify({ ok: false, reason: "点击按钮后没有发起 /api/insert/sql 请求" }));
+      process.exit(1);
+    }
+    """
+    payload = _run_harness(post_js)
+    assert payload.get("ok") is True, (
+        "结果页的「生成 INSERT 语句」按钮验证失败：\n"
+        f"reason={payload.get('reason')}\nstdout={payload.get('_raw_stdout')}"
     )

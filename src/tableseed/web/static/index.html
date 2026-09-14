@@ -506,6 +506,35 @@
   </section>
 </main>
 
+<dialog id="sqlgen-dialog" style="max-width:900px;width:92vw">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+    <b style="font-size:15px">生成 INSERT 语句</b>
+    <span class="chip" id="sqlgen-info">—</span>
+    <span class="spacer"></span>
+    <button onclick="this.closest('dialog').close()">关闭</button>
+  </div>
+  <div class="hint" style="margin-bottom:10px">
+    不需要数据库连接 —— 复制或下载 SQL，到第三方平台（工单系统 / 客户端 / DBA 平台）执行即可。
+  </div>
+  <div class="row" style="margin-bottom:8px">
+    <span class="hint">方言</span>
+    <select id="sqlgen-dialect" style="width:130px">
+      <option value="mysql">MySQL</option>
+      <option value="postgresql">PostgreSQL</option>
+      <option value="oracle">Oracle</option>
+    </select>
+    <span class="hint">每条 INSERT 行数</span>
+    <input type="number" id="sqlgen-batch" value="1000" min="1" max="5000" style="width:90px">
+    <button id="btn-sqlgen-refresh">重新生成</button>
+    <span class="spacer"></span>
+    <button class="primary" id="btn-sqlgen-copy">复制全部</button>
+    <button id="btn-sqlgen-download">下载 .sql</button>
+  </div>
+  <textarea id="sqlgen-text" class="sqlbox" spellcheck="false"
+    style="height:52vh;font-size:12.5px" placeholder="点击「生成 INSERT 语句」后在这里查看"></textarea>
+  <div class="hint" id="sqlgen-hint" style="margin-top:6px"></div>
+</dialog>
+
 <dialog id="log-dialog" style="max-width:760px">
   <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
     <b style="font-size:15px">操作详情</b>
@@ -1161,6 +1190,7 @@ function renderResult(data) {
   // 两段式：生成在内存里预览，确认后才真正入库
   html += `<div class="row" style="margin-bottom:14px">
     <button class="primary" id="btn-confirm-insert" ${invFails.length ? 'title="存在不变量违例，仍可插入"' : ""}>确认插入数据库</button>
+    <button id="btn-gen-insert-sql" title="渲染成 INSERT 语句，复制到第三方平台执行 —— 不需要数据库连接">生成 INSERT 语句</button>
     <span class="hint" id="insert-hint">数据在内存中预览，确认后才写入数据库（连接用左栏顶部配置）</span>
   </div>
   <div id="insert-out"></div>`;
@@ -1176,6 +1206,7 @@ function renderResult(data) {
   }
   out.innerHTML = html;
   $("btn-confirm-insert").addEventListener("click", confirmInsert);
+  $("btn-gen-insert-sql").addEventListener("click", showInsertSqlDialog);
 }
 
 async function confirmInsert() {
@@ -1314,6 +1345,71 @@ async function removeConfigFile() {
   } catch (e) {
     setStatus("移除失败：" + e.message);
   }
+}
+
+// ---------------------------------------------------------------- 生成 INSERT 语句（离线场景）
+
+let sqlGenState = { sql: "", dialect: "mysql" };
+
+async function loadInsertSql(refreshHint) {
+  const out = $("sqlgen-text");
+  out.value = "生成中…";
+  try {
+    const body = {
+      dialect: $("sqlgen-dialect").value,
+      batch_size: parseInt($("sqlgen-batch").value, 10) || null,
+    };
+    const res = await api("/api/insert/sql", { method: "POST", body: JSON.stringify(body) });
+    sqlGenState = { sql: res.sql, dialect: res.dialect };
+    out.value = res.sql;
+    const kb = Math.round(res.bytes / 1024);
+    const detail = Object.entries(res.tables).map(([n, c]) => `${n} ${c} 行`).join(" · ");
+    $("sqlgen-info").textContent = `${res.dialect} · ${res.total_rows} 行 · ${kb} KB`;
+    $("sqlgen-info").className = "chip on";
+    $("sqlgen-hint").textContent =
+      `${detail} · 按表的先后顺序执行（已按依赖排序）`
+      + (kb > 2048 ? " · 内容较大，建议用「下载 .sql」" : "");
+  } catch (e) {
+    out.value = "";
+    $("sqlgen-hint").textContent = e.message;
+  }
+}
+
+function showInsertSqlDialog() {
+  // 方言默认跟当前连接一致
+  const conn = (editConnections.connections || {})[editConnections.active];
+  const type = (conn && (conn.dialect || conn.type)) || "mysql";
+  if (["mysql", "postgresql", "oracle"].includes(type)) $("sqlgen-dialect").value = type;
+  $("sqlgen-dialog").showModal();
+  loadInsertSql();
+}
+
+async function copyInsertSql() {
+  const text = $("sqlgen-text").value;
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus("INSERT 语句已复制到剪贴板");
+  } catch (e) {
+    // 剪贴板 API 在非安全上下文不可用 —— 退化为全选，让用户按 Ctrl+C
+    $("sqlgen-text").focus();
+    $("sqlgen-text").select();
+    setStatus("已全选，请按 Ctrl+C 复制");
+  }
+}
+
+function downloadInsertSql() {
+  const text = $("sqlgen-text").value;
+  if (!text) return;
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+  const blob = new Blob([text], { type: "application/sql;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `tableseed-${sqlGenState.dialect}-${stamp}.sql`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(a.href);
 }
 
 // ---------------------------------------------------------------- 数据库连接
@@ -1718,6 +1814,13 @@ on("cfg-file-select", "change", (e) => {
 });
 on("btn-saveas-confirm", "click", doSaveAs);
 on("saveas-path", "keydown", (e) => { if (e.key === "Enter") doSaveAs(); });
+
+// 生成 INSERT 语句弹窗
+on("btn-sqlgen-refresh", "click", () => loadInsertSql());
+on("btn-sqlgen-copy", "click", copyInsertSql);
+on("btn-sqlgen-download", "click", downloadInsertSql);
+on("sqlgen-dialect", "change", () => loadInsertSql());
+on("sqlgen-batch", "change", () => loadInsertSql());
 
 boot();
 

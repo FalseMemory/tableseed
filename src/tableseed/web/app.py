@@ -406,6 +406,69 @@ def create_app(config_path: str | None = None) -> FastAPI:
             problems = [str(exc)]
         return {"yaml": text, "problems": problems}
 
+    @app.post("/api/insert/sql")
+    def render_insert_sql(payload: dict[str, Any]) -> dict[str, Any]:
+        """把最近一次生成结果渲染成 INSERT 语句 —— **不需要数据库连接**。
+
+        为什么需要它：目标库不允许直连（生产库只走工单/第三方平台）时，
+        造数工具不能因此变成废物。生成 SQL 交给用户去对方平台执行即可。
+        多表按**生成顺序（拓扑序）** 拼接，保证外键依赖在前。
+        """
+        from ..render import render_sql  # noqa: PLC0415
+
+        if state.last_result is None:
+            raise HTTPException(status_code=400, detail="还没有生成过数据 —— 请先点「生成数据」")
+
+        dialect = (payload.get("dialect") or "").strip()
+        if not dialect:
+            # 没指定就跟当前连接走；连不上库时给最通用的 mysql
+            try:
+                from ..config.connections import ConnectionsStore  # noqa: PLC0415
+                spec = ConnectionsStore().active_spec()
+                dialect = (spec.dialect or spec.type) if spec else "mysql"
+            except Exception:  # noqa: BLE001 - 推断失败不影响渲染
+                dialect = "mysql"
+
+        default_batch = {"oracle": 100, "postgresql": 500}.get(dialect, 1000)
+        try:
+            batch_size = int(payload.get("batch_size") or default_batch)
+        except (TypeError, ValueError):
+            batch_size = default_batch
+        batch_size = max(1, min(batch_size, 5000))
+        quote = payload.get("quote", True)
+
+        result = state.last_result
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        lines = [
+            f"-- tableseed 生成 · 共 {sum(len(d) for d in result.tables.values())} 行"
+            f" · seed={result.seed} · 方言={dialect}",
+            f"-- 生成时间 {stamp}（同 seed + 同配置可复现同一批数据）",
+            f"-- 建议执行顺序：按下方表的先后顺序（已按依赖排序）",
+            "",
+        ]
+        parts: list[str] = []
+        for name, data in result.tables.items():   # dict 顺序 = 生成顺序 = 拓扑序
+            parts.append(f"-- ===== 表 {name}（{len(data)} 行）=====")
+            parts.append(render_sql(data, dialect=dialect, batch_size=batch_size, quote=quote))
+            parts.append("")
+        sql = "\n".join(lines) + "\n".join(parts)
+
+        tables = {n: len(d) for n, d in result.tables.items()}
+        size = len(sql.encode("utf-8"))
+        state.log_operation(
+            "生成 INSERT", f"{sum(tables.values())} 行 → {dialect} SQL（{size // 1024} KB）"
+        )
+        return {
+            "ok": True,
+            "dialect": dialect,
+            "batch_size": batch_size,
+            "quote": bool(quote),
+            "sql": sql,
+            "total_rows": sum(tables.values()),
+            "tables": tables,
+            "bytes": size,
+        }
+
     # ---------------------------------------------------------- 配置文件工作区（多文件）
 
     @app.get("/api/workspace")
