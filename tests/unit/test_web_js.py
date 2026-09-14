@@ -224,6 +224,49 @@ def test_script_boots_with_stub_dom():
     )
 
 
+#: 取值参数的宽松解析用例 —— 用户写法五花八门，别让他撞 JSON 语法
+PARAM_CASES = [
+    # (key, 用户输入, 期望结构)
+    ("values", "['Q','A','E']", [["Q"], ["A"], ["E"]]),                # 单引号（用户实际报过）
+    ("values", '["Q","A","E"]', [["Q"], ["A"], ["E"]]),                # 标准 JSON
+    ("values", "Q, A, E", [["Q"], ["A"], ["E"]]),                      # 逗号分隔
+    ("values", "[Q, A, E]", [["Q"], ["A"], ["E"]]),                    # 无引号 + 方括号
+    ("values", "[['01','正常'],['02','冻结']]", [["01", "正常"], ["02", "冻结"]]),  # 两层单引号
+    ("values", "01", [["01"]]),                                        # 裸单值
+    ("values", "'01'", [["01"]]),                                      # 裸单值带引号
+    ("value", "'0001'", ["0001"]),
+    ("value", "0001", ["0001"]),                                       # 前导零保留为字符串
+    ("value", '["0001","001"]', ["0001", "001"]),                      # const 多字段
+    ("value", "123.45", [123.45]),
+    ("range", "[0, 1000]", [0, 1000]),                                 # 其他参数不受影响
+]
+
+
+@allure.story("取值参数宽容解析：单引号 / 逗号分隔 / 裸值都能进")
+def test_param_parsing_is_lenient():
+    cases = json.dumps(PARAM_CASES, ensure_ascii=False)
+    post_js = f"""
+    const cases = {cases};
+    const bad = [];
+    for (const [key, input, expected] of cases) {{
+      const got = parseParam(key, input);
+      if (JSON.stringify(got) !== JSON.stringify(expected)) {{
+        bad.push({{ key, input, expected, got }});
+      }}
+    }}
+    if (bad.length) {{
+      console.log(JSON.stringify({{ ok: false, reason: "解析结果不符预期",
+        bad: bad.slice(0, 5) }}));
+      process.exit(1);
+    }}
+    """
+    payload = _run_harness(post_js)
+    assert payload.get("ok") is True, (
+        f"参数解析用例失败：{payload.get('bad') or payload.get('reason')}\n"
+        f"stdout={payload.get('_raw_stdout')}\nstderr={payload.get('_raw_stderr')}"
+    )
+
+
 @allure.story("结果页：点击生成后出现「生成 INSERT 语句」按钮并可点击")
 def test_insert_sql_button_rendered():
     """离线场景的入口必须在结果页真正渲染出来，且点击能触发渲染请求。

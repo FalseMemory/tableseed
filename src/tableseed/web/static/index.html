@@ -1038,6 +1038,9 @@ function bindEditor() {
       input.addEventListener("change", () => {
         const key = input.dataset.key;
         g[key] = parseParam(key, input.value);
+        // 把实际解析结果放到 tooltip —— 用户写的单引号/逗号分隔会被自动纠正，
+        // 悬停就能看到最终结构，不用等保存报错才知道对不对
+        input.title = "解析为：" + JSON.stringify(g[key]);
       });
     });
     document.querySelector(`.ed-del[data-gi="${gi}"]`).addEventListener("click", () => {
@@ -1051,9 +1054,63 @@ function parseMaybeJson(text) {
   const t = text.trim();
   if (!t) return "";
   if (t.startsWith("[") || t.startsWith("{") || /^-?\d+(\.\d+)?$/.test(t)) {
-    try { return JSON.parse(t); } catch (e) { return text; }
+    try { return JSON.parse(t); } catch (e) {
+      // 单引号风格（Python / YAML）→ 转成 JSON 再试一次
+      try { return JSON.parse(singleToDoubleQuotes(t)); } catch (e2) { return text; }
+    }
   }
   return text;
+}
+
+// ---- 宽松解析：用户会写 Python / YAML 风格的单引号，别让他撞 JSON 语法 ----
+
+//: 剥掉最外层成对引号：'0001' → 0001
+function stripQuotes(text) {
+  const m = String(text).trim().match(/^(['"])([\s\S]*)\1$/);
+  return m ? m[2] : String(text).trim();
+}
+
+//: 把单引号字符串转成 JSON 合法形式：'Q' → "Q"（内部的 " 转义，\\' 还原）
+function singleToDoubleQuotes(text) {
+  return text.replace(/'((?:\\.|[^'\\])*)'/g, (m, inner) => {
+    const unescaped = inner.replace(/\\'/g, "'").replace(/"/g, '\\"');
+    return '"' + unescaped + '"';
+  });
+}
+
+/**
+ * 尽力把一段文本解析成数组。
+ * 依次尝试：严格 JSON → 单引号宽松转换 → 无括号的逗号分隔（Q, A, E）。
+ * 全部失败返回 null（调用方给用户提示，而不是把整串当字符串塞给后端）。
+ */
+function parseLenientArray(text) {
+  const t = text.trim();
+  if (!t) return null;
+  if (t.startsWith("[")) {
+    try { return JSON.parse(t); } catch (e) { /* 继续尝试宽松形式 */ }
+    try { return JSON.parse(singleToDoubleQuotes(t)); } catch (e) { /* 继续 */ }
+    // [Q, A, E]（无引号）→ 去掉括号按逗号分词
+    const inner = t.replace(/^\[/, "").replace(/\]$/, "").trim();
+    if (inner.includes(",")) {
+      const parts = inner.split(",").map((s) => {
+        const item = s.trim();
+        const quoted = item.match(/^(['"])([\s\S]*)\1$/);
+        return quoted ? quoted[2] : smartScalar(item);
+      }).filter((s) => s !== "");
+      if (parts.length) return parts;
+    }
+    return null;
+  }
+  // 无括号的逗号分隔：Q, A, E 或 'Q', 'A', 'E'
+  if (t.includes(",")) {
+    const parts = t.split(",").map((s) => {
+      const item = s.trim();
+      const quoted = item.match(/^(['"])([\s\S]*)\1$/);
+      return quoted ? quoted[2] : smartScalar(item);
+    }).filter((s) => s !== "");
+    return parts.length ? parts : null;
+  }
+  return null;
 }
 
 // ---- 取值参数的显示与解析：单值去掉中括号和引号（裸值），多值仍是 JSON ----
@@ -1079,20 +1136,25 @@ function smartScalar(text) {
 
 function parseParam(key, text) {
   const t = text.trim();
-  if (!t) return key === "value" ? [] : [];
-  if (t.startsWith("[")) {
-    const parsed = parseMaybeJson(t);
-    // enum 宽松写法：一层数组 ["a","b"] → 每项包一层 [["a"],["b"]]
-    if (key === "values" && Array.isArray(parsed) && parsed.some((v) => !Array.isArray(v))) {
-      return parsed.map((v) => [v]);
-    }
-    return parsed;
+
+  // ---- enum / boundary 的 values：元组列表 ----
+  if (key === "values") {
+    if (!t) return [];
+    const arr = parseLenientArray(t);
+    if (arr === null) return [[smartScalar(stripQuotes(t))]];   // 裸单值：01 / '01' → [["01"]]
+    // 一层数组 → 每项包一层（["a","b"] → [["a"],["b"]]）；两层原样
+    return arr.some((v) => !Array.isArray(v)) ? arr.map((v) => [v]) : arr;
   }
-  // 裸值（用户按提示只填了内容本身）→ 按组类型包回模型要求的结构
-  const scalar = smartScalar(t);
-  if (key === "value") return [scalar];           // const
-  if (key === "values") return [[scalar]];        // enum / boundary
-  return parseMaybeJson(t);                       // 其余参数（range 等）维持原逻辑
+
+  // ---- const 的 value：一个元组 ----
+  if (key === "value") {
+    if (!t) return [];
+    const arr = parseLenientArray(t);
+    return arr !== null ? arr : [smartScalar(stripQuotes(t))];  // 裸单值：0001 / '0001' → ["0001"]
+  }
+
+  // ---- 其余参数（range / buckets / weighted 等）----
+  return parseMaybeJson(t);
 }
 
 async function saveEditor() {

@@ -22,7 +22,7 @@ _CN: dict[str, str] = {
     "float_parsing": "应为数字（当前内容无法解析成数字）",
     "bool_type": "应为 true / false",
     "bool_parsing": "应为 true / false",
-    "list_type": "应为数组 —— JSON 列表写法，形如 [\"a\", \"b\"]",
+    "list_type": "应为数组 —— 支持这几种写法：[\"Q\",\"A\"] / ['Q','A'] / Q, A（编辑器里也会自动识别）",
     "dict_type": "应为映射 —— JSON 对象写法，形如 {\"k\": \"v\"}",
     "enum": "取值不在允许范围内",
     "extra_forbidden": "不认识的字段 —— 请检查拼写",
