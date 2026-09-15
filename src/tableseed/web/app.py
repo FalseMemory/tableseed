@@ -404,7 +404,9 @@ def create_app(config_path: str | None = None) -> FastAPI:
             problems = service.check(config)
         except TableSeedError as exc:
             problems = [str(exc)]
-        return {"yaml": text, "problems": problems}
+        # 占位模板不是真配置 —— 显式告知前端，避免它被当成草稿保存、覆盖用户文件
+        placeholder = text.lstrip().startswith("# 无法生成配置")
+        return {"yaml": text, "problems": problems, "placeholder": placeholder}
 
     @app.post("/api/insert/sql")
     def render_insert_sql(payload: dict[str, Any]) -> dict[str, Any]:

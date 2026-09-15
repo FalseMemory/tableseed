@@ -1,105 +1,53 @@
+# 未提供建表语句 —— 列与类型由 INSERT 样例推断, 字段分组为草稿, 请按需调整
+# 表: t_txn  生成时间标记见 seed
 seed: 20260910
+
 limits:
-  max_rows: 1000
-  total_rows: 100000
+  max_rows: 100000
   strategy: full
+
 tables:
-- name: t_txn
-  groups:
-  - name: g_txn_no
-    type: sequence
-    fields:
-    - txn_no
-    allocation: follow_parent
-    start: 1001
-    step: 1
-    format: txn_no_{seq:06d}
-  - name: g_txn_type
-    type: const
-    fields:
-    - txn_type
-    allocation: follow_parent
-    start: 1
-    step: 1
-    value:
-    - Q
-  - name: g_txn_type_desc
-    type: const
-    fields:
-    - txn_type_desc
-    allocation: follow_parent
-    start: 1
-    step: 1
-    value:
-    - ''
-  - name: g_channel
-    type: const
-    fields:
-    - channel
-    allocation: follow_parent
-    start: 1
-    step: 1
-    value:
-    - OTC
-  - name: g_currency
-    type: const
-    fields:
-    - currency
-    allocation: follow_parent
-    start: 1
-    step: 1
-    value:
-    - HKD
-  - name: g_amount
-    type: const
-    fields:
-    - amount
-    allocation: follow_parent
-    start: 1
-    step: 1
-    value:
-    - 1491714.43
-  - name: g_fee
-    type: const
-    fields:
-    - fee
-    allocation: follow_parent
-    start: 1
-    step: 1
-    value:
-    - 1568.63
-  - name: g_tenant_id
-    type: const
-    fields:
-    - tenant_id
-    allocation: follow_parent
-    start: 1
-    step: 1
-    value:
-    - '0001'
-  - name: g_detail_amount_sum
-    type: const
-    fields:
-    - detail_amount_sum
-    allocation: follow_parent
-    start: 1
-    step: 1
-    value:
-    - 1241563.68
-  - name: g_log_count
-    type: random
-    fields:
-    - log_count
-    allocation: follow_parent
-    start: 1
-    step: 1
-    generator: int
-    range:
-    - 0
-    - 1000
-  scope: per_parent
-  rows: 1
-sql:
-  allow_write: false
-  max_rows: 1000
-  timeout_seconds: 30
+  - name: t_txn
+    rows: 1   # 全为逐行组, 行数按此声明（当前 1 行, 要更多改这个数）
+    groups:
+      - type: sequence
+        name: g_txn_no
+        fields: [txn_no]
+        start: 1
+        format: "txn_no_{seq:06d}"
+      - type: const
+        name: g_txn_type
+        fields: [txn_type]
+        value: ["Q"]
+      - type: const
+        name: g_txn_type_desc
+        fields: [txn_type_desc]
+        value: [""]
+      - type: const
+        name: g_channel
+        fields: [channel]
+        value: ["OTC"]
+      - type: const
+        name: g_currency
+        fields: [currency]
+        value: ["HKD"]
+      - type: const
+        name: g_amount
+        fields: [amount]
+        value: [1491714.43]
+      - type: const
+        name: g_fee
+        fields: [fee]
+        value: [1568.63]
+      - type: const
+        name: g_tenant_id
+        fields: [tenant_id]
+        value: ["0001"]
+      - type: const
+        name: g_detail_amount_sum
+        fields: [detail_amount_sum]
+        value: [1241563.68]
+      - type: const
+        name: g_log_count
+        fields: [log_count]
+        value: [null]

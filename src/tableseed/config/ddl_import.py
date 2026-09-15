@@ -44,6 +44,9 @@ class Column:
     primary_key: bool = False
     comment: str = ""
     samples: list[Any] = field(default_factory=list)  # INSERT 里的样例值
+    #: 类型信息来源 —— "ddl"（有建表语句，如实尊重声明）
+    #: 或 "samples"（只有 INSERT，类型靠样例猜，需要更多的启发式兜底）
+    type_source: str = "ddl"
 
 
 # ---------------------------------------------------------------- DDL 解析
@@ -226,19 +229,47 @@ def generate_yaml(
     table: str | None = None,
     seed: int = 20260910,
 ) -> str:
-    """从 DDL + INSERT 样例生成 YAML 配置草稿。"""
-    table_name, columns = parse_create_table(ddl)
-    if not table_name:
-        table_name = table or "t_new_table"
-    if not columns:
-        return _empty_yaml(table_name)
+    """从 DDL + INSERT 样例生成 YAML 配置草稿。
 
+    **两者至少要有一个**，而且**只有 INSERT 也能出完整配置**：
+    生产环境常常拿不到建表语句，只有几条真实数据 —— 那就用 INSERT 里
+    声明的列名当列清单，样例值当类型推断依据（`txn_no` 这类 _no/_id 结尾
+    的列自动当自增主键，否则单值样例会让主键全相同、必然冲突）。
+    """
+    t = table.strip() if table else ""
+    ddl_table, columns = parse_create_table(ddl)
+    ins_table = insert_table_name(inserts)
+    table_name = ddl_table or t or ins_table or "t_new_table"
+
+    # 用最终表名去取样例；表名对不上时退化为"不管表名，取所有 INSERT 的列"
     samples = parse_inserts(inserts, table_name) if inserts else {}
-    for column in columns:
-        column.samples = samples.get(column.name, [])
+    if not samples and inserts:
+        samples = parse_inserts(inserts)
+    origin = "ddl"
+    if not columns:
+        if not samples:
+            return _empty_yaml(table_name, ddl_given=bool(ddl and ddl.strip()))
+        columns = [
+            Column(
+                name=name,
+                type_raw=_guess_type_from_samples(values),
+                samples=values,
+                type_source="samples",     # 没有 DDL，主键只能靠名字猜
+            )
+            for name, values in samples.items()
+        ]
+        origin = "insert"
+    else:
+        for column in columns:
+            column.samples = samples.get(column.name, [])
+
+    if origin == "ddl":
+        first_line = "# 由建表语句与 INSERT 样例自动生成 —— 字段分组为草稿, 请按需调整"
+    else:
+        first_line = "# 未提供建表语句 —— 列与类型由 INSERT 样例推断, 字段分组为草稿, 请按需调整"
 
     head = [
-        "# 由建表语句与 INSERT 样例自动生成 —— 字段分组为草稿, 请按需调整",
+        first_line,
         f"# 表: {table_name}  生成时间标记见 seed",
         f"seed: {seed}",
         "",
@@ -291,12 +322,32 @@ def _infer_type(column: Column) -> str:
     """
     base_type = (column.type_raw or "").lower()
     samples = [v for v in column.samples if v is not None]
+    # 编号类列判定：_no / _seq 结尾（业务流水号，几乎总唯一）；
+    # **_id 结尾只有数值类型才算** —— 字符串型 `tenant_id = '0001'` 更像业务码/外键，
+    # 判成自增会把"租户号"变成递增数字，语义就错了。
+    numeric = bool(re.match(
+        r"^(int|bigint|smallint|tinyint|integer|number|decimal|numeric)", base_type
+    ))
     is_id_like = bool(
-        column.primary_key or re.search(r"(_no|_id|_seq)$", column.name, re.IGNORECASE)
+        column.primary_key
+        or re.search(r"(_no|_seq)$", column.name, re.IGNORECASE)
+        or (re.search(r"_id$", column.name, re.IGNORECASE) and numeric)
     )
 
-    # 主键必须唯一 —— 无论样例多少都用 sequence
-    if column.primary_key or (is_id_like and not samples):
+    # 全是 NULL 的列：忠实于样例 —— 生成 NULL，不猜值
+    if column.samples and not samples:
+        return "const"
+
+    # 主键 —— 无论样例多少都用 sequence
+    if column.primary_key:
+        return "sequence"
+    # **只有"没有 DDL"时才靠名字猜唯一键**：有建表语句就如实尊重声明，
+    # 否则会打破用户既有的分组设计（例如 acct_no 本来要用作枚举做覆盖组合）。
+    # 没有 DDL 时若无此启发式：1 条样例的 txn_no 会变成 const，
+    # 生成多行主键全相同、插入必然冲突。
+    if column.type_source == "samples" and is_id_like and (
+        not samples or len(set(map(str, samples))) == len(samples)
+    ):
         return "sequence"
     # 只有 1 条样例（或样例值完全一致）→ const，不猜
     if len(samples) == 1 or (samples and len(set(map(str, samples))) == 1):
@@ -334,7 +385,14 @@ def _group_lines(
                        extra=["start: 1", f'format: "{column.name}_{{seq:06d}}"'])
 
     if kind == "const":
-        return _render(base, name, indent, extra=[f"value: [{_y(samples[0])}]"])
+        # 空值优先用原始样例（全 NULL 列会被推断成 const，此时 samples 里没有值）
+        if samples:
+            literal = _y(samples[0])
+        elif column.samples:
+            literal = "null"          # 样例全是 NULL → 就生成 NULL
+        else:
+            literal = '""'            # 完全没有样例 → 空串占位，用户自行填
+        return _render(base, name, indent, extra=[f"value: [{literal}]"])
 
     if kind == "enum":
         distinct = list(dict.fromkeys(samples))
@@ -388,8 +446,48 @@ def _numeric_range(samples: list[Any], cast) -> tuple[int, int]:
     return 0, 1000
 
 
-def _empty_yaml(table_name: str) -> str:
-    return f"""# 未从 DDL 解析到列 —— 请检查建表语句格式
+def insert_table_name(sql: str) -> str:
+    """从 INSERT 语句里取表名（没有则返回空串）。"""
+    m = re.search(
+        r"INSERT\s+(?:IGNORE\s+)?INTO\s+" + _IDENT, sql or "", re.IGNORECASE
+    )
+    return m.group(1) if m else ""
+
+
+def _guess_type_from_samples(values: list[Any]) -> str:
+    """没有 DDL 时，按样例值推断一个"伪类型串"，供 _infer_type 决策。
+
+    **按 Python 类型判断，而不是拿字符串去匹配数字正则** ——
+    `_parse_values` 已经把 INSERT 原文的引号信息转成了类型：
+    裸数字 → int/float，带引号的 → str。所以 `'0001'`（业务码）
+    不会被误判成数值列，`12345`（裸数字）才是。
+
+    推断结果只影响生成器选择（整数/小数/日期/字符串），不参与建表 ——
+    猜错也不致命，用户可以在配置里改。
+    """
+    real = [v for v in values if v is not None]
+    if not real:
+        return "varchar(255)"
+    if all(isinstance(v, bool) is False and isinstance(v, int) for v in real):
+        return "bigint" if max(len(str(abs(v))) for v in real) > 9 else "int"
+    if all(isinstance(v, (int, float)) for v in real):
+        return "decimal(18,2)"
+    texts = [str(v) for v in real]
+    if all(re.fullmatch(r"\d{4}-\d{2}-\d{2}", s) for s in texts):
+        return "date"
+    if all(re.fullmatch(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}", s) for s in texts):
+        return "datetime"
+    longest = max(len(s) for s in texts)
+    return f"varchar({max(32, longest)})"
+
+
+def _empty_yaml(table_name: str, ddl_given: bool = False) -> str:
+    hint = (
+        "# 无法生成配置：建表语句里没解析到列 —— 请检查格式（是否含 CREATE TABLE 与括号内的列定义）"
+        if ddl_given
+        else "# 无法生成配置：未填写建表语句也没贴 INSERT 样例 —— 两者至少填一个，才能推出列清单"
+    )
+    return f"""{hint}
 seed: 20260910
 
 limits:

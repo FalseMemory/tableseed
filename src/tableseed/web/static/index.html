@@ -441,16 +441,18 @@
 
     <div class="tab-body" id="tab-import" hidden>
       <div class="hint" style="margin-bottom:10px">
-        贴入建表语句（DDL）与几条真实 INSERT —— 自动生成 YAML 配置草稿，
-        字段分组、取值范围都有了合理默认，生成后可在左栏或「配置编辑器」里精修。
+        贴入建表语句（DDL）与真实 INSERT 样例 —— <b>两者至少填一个</b>：
+        只有 DDL 时列类型最准；<b>只有 INSERT 也能出完整配置</b>，列清单与类型由样例推断
+        （编号列自动用自增、业务码保持常量、NULL 列生成 NULL）。
+        生成后可在左栏或「配置编辑器」里精修。
       </div>
       <div class="row">
-        <input type="text" id="imp-table" placeholder="表名（留空则从 DDL 解析）" style="width:220px">
+        <input type="text" id="imp-table" placeholder="表名（留空则从 DDL / INSERT 里解析）" style="width:220px">
         <span class="spacer"></span>
         <button class="primary" id="btn-import">生成 YAML 草稿</button>
       </div>
-      <textarea class="sqlbox" id="imp-ddl" spellcheck="false" placeholder="CREATE TABLE ..."></textarea>
-      <textarea class="sqlbox" id="imp-inserts" spellcheck="false" placeholder="INSERT INTO ... VALUES (...), (...);" style="margin-top:8px"></textarea>
+      <textarea class="sqlbox" id="imp-ddl" spellcheck="false" placeholder="CREATE TABLE ...（可留空，只贴 INSERT 也行）（可留空，只贴 INSERT 也行）  （可留空，只贴 INSERT 也行）"></textarea>
+      <textarea class="sqlbox" id="imp-inserts" spellcheck="false" placeholder="INSERT INTO ...（可留空，只贴 DDL 也行）（可留空，只贴 DDL 也行） VALUES (...), (...);" style="margin-top:8px"></textarea>
       <div id="imp-out" style="margin-top:12px"></div>
     </div>
 
@@ -859,6 +861,16 @@ async function runImport() {
         table: $("imp-table").value || null,
       }),
     });
+    // 占位模板不是真配置：只提示，不送进左栏编辑器 ——
+    // 否则用户顺手保存就会用自己的残缺文件覆盖原配置（真实踩过）
+    if (res.placeholder) {
+      out.innerHTML = msg("err", "无法生成配置",
+        ["建表语句（DDL）与 INSERT 样例至少填一个。",
+         "只有 DDL：列类型最准。只有 INSERT：列清单与类型由样例推断。"]);
+      setStatus("未生成配置");
+      return;
+    }
+
     $("yaml").value = res.yaml;   // 直接送进左栏编辑器
     await validate(true);
 
