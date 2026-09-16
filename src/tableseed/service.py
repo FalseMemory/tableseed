@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from .config import check_config, load_config, load_config_from_text
+from .errors import GenerateError
 from .engine import generate_all, verify_invariants
 from .models import GenerateResult, InvariantFailure, PlanResult, SeedConfig
 from .plan import plan_tables
@@ -58,6 +59,12 @@ def verify(
     ``result`` 缺省时先在内存里生成一份（不落盘）——
     验证的是「这套配置会造出什么」，而不是「库里已有什么」。
     """
+    # 先静态校验：不变量指向不存在的表、表达式写错之类的问题要在这里报出来，
+    # 而不是等到跑到一半抛 KeyError（Web 层就成了 500）
+    problems = [p for p in check(config) if not p.startswith("[提示]")]
+    if problems:
+        raise GenerateError("配置校验未通过：\n  - " + "\n  - ".join(problems))
+
     if result is None:
         result = generate_all(config, SeededRandom(config.seed))
     return verify_invariants(config, result.tables)

@@ -10,6 +10,8 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .errors import ConfigError
+
 # ---------------------------------------------------------------- 枚举类型
 
 GroupType = Literal[
@@ -111,8 +113,10 @@ class TableSpec(_Model):
     scope: Scope = "per_parent"
 
     #: 行数上限；当该表没有任何有限取值组时，它同时是**行数来源**
-    #: （纯随机表：字段全由 random / sequence / derive 组提供）
-    rows: int | None = None
+    #: （纯随机表：字段全由 random / sequence / derive 组提供）。
+    #: 必须 ≥ 1 —— 写 0 / 负数会被静默当成 0 行生成出空结果，
+    #: 用户看到"生成成功但一行都没有"完全无从判断哪里错了。
+    rows: int | None = Field(default=None, ge=1)
 
 
 class InvariantSpec(_Model):
@@ -335,10 +339,16 @@ _DRIVERS = {
 
 
 def _quote(value: str) -> str:
-    """URL 编码用户名/密码 —— 密码里带 @ : / 等字符时不编码会拼坏连接串。"""
-    from urllib.parse import quote_plus
+    """URL 编码用户名/密码 —— 密码里带 @ : / 等字符时不编码会拼坏连接串。
 
-    return quote_plus(value)
+    **必须用 ``quote(safe="")`` 而不是 ``quote_plus``**：
+    quote_plus 把空格编成 ``+``，而 URL 解析时 ``+`` 是字面加号，
+    于是 `My Pass 123` 会变成 `My+Pass+123` —— 密码错误、连接被拒，
+    用户看着自己填的密码完全找不到原因。
+    """
+    from urllib.parse import quote
+
+    return quote(value, safe="")
 
 
 def _mask_password(url: str) -> str:
@@ -378,10 +388,17 @@ class SeedConfig(_Model):
         return value
 
     def table(self, name: str) -> TableSpec:
+        """按名取表。
+
+        找不到时抛 **ConfigError**（可读）而不是 KeyError ——
+        KeyError 会一路逃到 Web 层变成 500「Internal Server Error」，
+        用户完全看不出是"表名写错了"还是"配置别处有问题"。
+        """
         for t in self.tables:
             if t.name == name:
                 return t
-        raise KeyError(name)
+        available = ", ".join(t.name for t in self.tables) or "（没有任何表）"
+        raise ConfigError(f"表不存在: {name}（可用表: {available}）")
 
 
 # ---------------------------------------------------------------- 运行时对象

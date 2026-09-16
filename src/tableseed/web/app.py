@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
 
@@ -261,6 +262,16 @@ def create_app(config_path: str | None = None) -> FastAPI:
     @app.exception_handler(TableSeedError)
     async def _domain_error_handler(_request, exc: TableSeedError):
         return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    # 请求参数校验（422）也走中文 —— 否则用户看到的是 FastAPI 默认的英文结构
+    # （[{'type': 'string_type', 'loc': ['body','text'], 'msg': 'Input should be...'}]），
+    # 与配置校验的中文提示风格完全不一致
+    @app.exception_handler(RequestValidationError)
+    async def _request_validation_handler(_request, exc: RequestValidationError):
+        return JSONResponse(
+            status_code=422,
+            content={"detail": explain_validation(exc, prefix="请求参数")},
+        )
 
 
     # ---------------------------------------------------------------- 页面
@@ -746,8 +757,10 @@ def create_app(config_path: str | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         problems = service.check(config)
-        if problems:
-            raise HTTPException(status_code=400, detail={"problems": problems})
+        # [提示] 不算错误（例如"传播会覆盖组里的取值"是允许的覆盖语义），不拦生成
+        errors = [p for p in problems if not p.startswith("[提示]")]
+        if errors:
+            raise HTTPException(status_code=400, detail={"problems": errors})
 
         try:
             result = service.generate(
@@ -774,8 +787,9 @@ def create_app(config_path: str | None = None) -> FastAPI:
                 return
 
             problems = service.check(config)
-            if problems:
-                yield _sse("error", {"message": "配置校验未通过", "problems": problems})
+            errors = [p for p in problems if not p.startswith("[提示]")]
+            if errors:
+                yield _sse("error", {"message": "配置校验未通过", "problems": errors})
                 return
 
             total = len(config.tables)

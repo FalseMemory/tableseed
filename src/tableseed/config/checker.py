@@ -20,6 +20,12 @@ from ..engine.topology import topo_order
 def check_config(config: SeedConfig) -> list[str]:
     """返回问题清单；空列表表示通过。"""
     problems: list[str] = []
+
+    # 一张表都没有：不报错（编辑器新建文件时就是空的），但必须提示 ——
+    # 否则空文件也显示「校验通过」，用户不知道该干什么。
+    if not config.tables:
+        return ["还没有定义任何表 —— 请添加 tables，或在「生成配置」页贴入 DDL / INSERT 样例"]
+
     funcs = build_functions(SeededRandom(config.seed))
 
     # 由 propagate 提供取值的字段 —— 它们不必再归入任何组
@@ -240,11 +246,22 @@ def _check_propagate(
         if rule.mode == "free":
             continue
 
-        if rule.to not in child_fields:
+        # 真冲突：同一字段既在子表的取值组里，又由传播写入。
+        # 实际行为是"传播静默覆盖组里的值"（取决于执行顺序），用户按组里的取值
+        # 期望结果就会对不上。必须报出来让用户二选一。
+        if rule.to in group_fields_of(child_table):
+            # 加 [提示] 前缀：这是**可用的覆盖语义**（传播优先于组），不该拦下生成，
+            # 但组里的取值会被静默丢弃 —— 通知到，让用户自己决定是否去掉那个组
             problems.append(
-                f"{path}: 子表 {relation.child} 中不存在字段 {rule.to}"
-                f"（可用字段: {', '.join(sorted(child_fields))}）"
+                f"[提示] {path}: 字段 {rule.to} 既在子表 {relation.child} 的取值组里，"
+                "又由传播写入 —— 实际以传播值为准，组里的取值不会生效"
             )
+
+        # 注意：**不检查 `to` 是否已存在于子表**。
+        # 传播的 `to` 是"创建者"而非"引用者" —— 子表字段完全可以由传播提供、
+        # 不归入任何组（文档推荐的用法）。曾经这里要求 to 必须已存在，
+        # 导致正确配置被误报「子表不存在字段 X」，用户以为配置错了不敢用
+        # （实际生成完全正常）。
 
         if rule.mode in {"copy", "map"}:
             if not rule.from_:
@@ -268,9 +285,24 @@ def _check_propagate(
                 )
 
         if rule.mode == "split":
+            # 来源字段必须在父表里存在（和 copy/map 同样的要求）
+            if rule.from_ and rule.from_ not in parent_fields:
+                problems.append(
+                    f"{path}: 父表 {relation.parent} 中不存在字段 {rule.from_}"
+                    f"（可用字段: {', '.join(sorted(parent_fields))}）"
+                )
             problems.extend(_check_split(config, relation, rule, path, child_table))
 
     return problems
+
+
+def group_fields_of(table: TableSpec) -> set[str]:
+    """这张表**取值组**里声明的字段（不含 join 锚点 / 列声明 / 传播字段）。
+
+    用来判断"传播是否在覆盖组里的值" —— join 锚点被传播写入是正常的，
+    组字段被传播写入才是冲突。
+    """
+    return {field for group in table.groups for field in group.fields}
 
 
 def _mentions_parent(expr: str, parent_fields: set[str]) -> bool:
@@ -416,8 +448,15 @@ def _check_aggregate(
 
 
 def _check_split(config: SeedConfig, relation, rule, path: str, child_table: TableSpec) -> list[str]:
-    """split 拆分的静态校验：份数声明、占比合法性、行数语义冲突。"""
+    """split 拆分的静态校验：来源字段、份数声明、占比合法性、行数语义冲突。"""
     problems: list[str] = []
+
+    # split 必须指明"拆哪个父字段" —— 漏写会让 total 取到 None，
+    # 运行时抛未包装的 TypeError（页面 500），用户完全看不出问题在哪
+    if not rule.from_:
+        problems.append(
+            f"{path}: split 必须声明 from（要拆分的父表字段，例如 amount）"
+        )
 
     if not rule.parts and not rule.ratio:
         problems.append(f"{path}: split 必须声明 parts（份数）或 ratio（占比）之一")

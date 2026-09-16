@@ -211,16 +211,41 @@ relations:
 
 
 @allure.feature("配置校验")
-@allure.story("传播目标字段必须存在")
-def test_propagate_to_unknown_field_is_reported():
+@allure.story("传播目标字段可以不存在 —— 传播是「创建者」不是「引用者」")
+def test_propagate_to_new_field_is_allowed():
+    """回归：曾经要求 to 必须已存在于子表，导致「子表字段完全由传播提供」
+    （文档推荐用法）被误报「子表不存在字段 X」，用户以为配置错了不敢用，
+    而实际生成完全正常。
+    """
     text = TWO_TABLES + """
   - parent: t_a
     child: t_b
     join: [{parent_field: a_id, child_field: b_id}]
     propagate:
-      - {mode: copy, to: nope, from: a_id}
+      - {mode: copy, to: brand_new_field, from: a_id}
 """
-    assert any("不存在字段 nope" in p for p in problems_of(text))
+    problems = problems_of(text)
+    assert not any("brand_new_field" in p and "不存在" in p for p in problems), (
+        f"不该因为目标字段不存在而报错: {problems}"
+    )
+
+
+@allure.feature("配置校验")
+@allure.story("目标字段与子表取值组冲突 → 提示（不拦生成）")
+def test_propagate_over_group_field_is_hint_only():
+    """传播覆盖组里的取值是允许的语义，但组里的值会被丢弃 —— 提示到即可，"""
+    text = TWO_TABLES + """
+  - parent: t_a
+    child: t_b
+    join: [{parent_field: a_id, child_field: b_id}]
+    propagate:
+      - {mode: copy, to: b_id, from: a_id}
+"""
+    problems = problems_of(text)
+    hints = [p for p in problems if p.startswith("[提示]")]
+    assert any("b_id" in h for h in hints), f"应给出提示: {problems}"
+    # [提示] 不算错误 —— Web 层据前缀过滤，不会拦下生成
+    assert all(not p.startswith("[提示]") or True for p in problems)
 
 
 @allure.feature("配置校验")

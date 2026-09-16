@@ -172,5 +172,6 @@ def test_missing_child_table_raises():
 
     broken = build('  - table: t_p\n    from: t_c\n    expr: "sum(detail_amt) = 150"\n')
     broken.relations[0].child = "t_ghost"
-    with pytest.raises(GenerateError, match="没有声明带 join 的关系|找不到子表"):
+    # 现在由 service.verify 的前置静态校验拦下，报错更具体（"子表不存在: t_ghost"）
+    with pytest.raises(GenerateError, match="子表不存在|没有声明带 join 的关系|找不到子表"):
         service.verify(broken)

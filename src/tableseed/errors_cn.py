@@ -51,8 +51,11 @@ _YAML_CN: list[tuple[str, str]] = [
 ]
 
 
-def explain_validation(exc: ValidationError) -> str:
-    """把 ValidationError 转成一行一条的中文提示（带字段路径）。"""
+def explain_validation(exc: ValidationError, prefix: str = "配置校验失败") -> str:
+    """把 ValidationError 转成一行一条的中文提示（带字段路径）。
+
+    ``prefix`` 让同一套映射服务两种场景：配置校验（默认）与请求参数校验。
+    """
     lines: list[str] = []
     for error in exc.errors():
         loc = ".".join(str(part) for part in error["loc"]) or "<根>"
@@ -75,7 +78,7 @@ def explain_validation(exc: ValidationError) -> str:
             if etype in ("model_type", "is_instance_of") and "class_name" in ctx:
                 desc += f"（期望结构：{ctx['class_name']}）"
         lines.append(f"{loc}: {desc}")
-    return "配置校验失败：\n  - " + "\n  - ".join(lines)
+    return f"{prefix}：\n  - " + "\n  - ".join(lines)
 
 
 def explain_yaml_error(exc: Exception) -> str:

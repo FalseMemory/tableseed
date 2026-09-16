@@ -39,6 +39,15 @@ def split_value(
     if parts < 1:
         raise GenerateError(f"split 的 parts 必须 >= 1，收到 {parts}", path)
 
+    # 总额缺失（propagate 漏写 from，或来源字段该行没值）—— 必须给出可读提示，
+    # 否则 TypeError 会一路逃到 Web 层变成 500，用户完全看不出哪里错了
+    if total is None:
+        raise GenerateError(
+            "split 拆分缺少总额：请检查 propagate 规则是否声明了 from（要拆分的父表字段），"
+            "以及该字段在父行里是否有值",
+            path,
+        )
+
     unit = 10**scale
     total_int = round(total * unit)
     if total_int < parts:

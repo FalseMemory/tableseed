@@ -104,6 +104,20 @@ class Evaluator:
         left = self._eval(node.left, env)
         right = self._eval(node.right, env)
         op = node.op
+        # ---- 规模防护：手滑写出的超大数/超长字符串会让进程卡死甚至吃爆内存 ----
+        # 例：`10**10**10` 会让服务 CPU 打满、整个页面无响应（用户只能杀进程）。
+        if isinstance(op, ast.Pow) and isinstance(right, (int, float)) and abs(right) > 1000:
+            raise ExprError(f"幂运算指数过大（{right}）—— 会产生超大数，请检查表达式")
+        if isinstance(op, ast.Pow) and isinstance(left, (int, float)) and isinstance(right, int):
+            digits = len(str(abs(int(left)))) if left else 1
+            if digits * right > 10_000:
+                raise ExprError("幂运算结果过大 —— 请检查表达式")
+        if isinstance(op, ast.Mult):
+            for text, times in ((left, right), (right, left)):
+                if isinstance(text, str) and isinstance(times, int) and len(text) * times > 1_000_000:
+                    raise ExprError(
+                        f"字符串重复次数过大（{len(text)} × {times}）—— 请检查表达式"
+                    )
         try:
             if isinstance(op, ast.Add):
                 return left + right
@@ -121,6 +135,14 @@ class Evaluator:
                 return left**right
         except TypeError as exc:
             raise ExprError(f"类型不匹配: {left!r} 与 {right!r}") from exc
+        except ZeroDivisionError as exc:
+            # 除零 / 取模零：必须包成可读错误，
+            # 否则 ZeroDivisionError 会一路逃到 Web 层变成 500 内部错误
+            raise ExprError(f"除以零: {left!r} 与 {right!r}") from exc
+        except OverflowError as exc:
+            raise ExprError(f"数值溢出: {left!r} 与 {right!r}") from exc
+        except ValueError as exc:
+            raise ExprError(f"数值无效: {left!r} 与 {right!r}（{exc}）") from exc
         raise ExprError("不支持的二元运算")
 
     def _eval_Compare(self, node: ast.Compare, env: dict[str, Any]) -> bool:
