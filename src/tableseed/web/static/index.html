@@ -1413,6 +1413,9 @@ async function doSaveAs() {
     });
     $("saveas-dialog").close();
     $("cfg-path").textContent = res.path;
+    // 先刷新清单（会把新文件加进下拉选项），再选中它 ——
+    // 顺序不能反：先设 value 的话，loadWorkspace 里 select.value = ws.active
+    // 会把它覆盖掉（用户报"另存为的文件根本不显示在配置文件中"）
     await loadWorkspace();
     $("cfg-file-select").value = res.path;
     setStatus(`已另存为 ${res.path}`);

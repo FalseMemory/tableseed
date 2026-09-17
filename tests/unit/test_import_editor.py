@@ -76,7 +76,7 @@ def test_generated_yaml_heuristics():
     assert "type: enum" in text                # 低基数字符串
     assert "generator: decimal" in text        # 金额不因样例少而变 enum
     assert "generator: date" in text
-    assert "generator: string" in text         # 无样例的 varchar
+    assert 'value: [""]' in text              # 无样例的 varchar → const 占位（不再是 random）
     assert "{{seq" not in text                 # 不残留转义大括号
 
 

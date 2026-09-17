@@ -367,7 +367,12 @@ def _infer_type(column: Column) -> str:
     # 字符串：样例值就是天然的枚举候选
     if samples:
         return "enum"
-    return "random"
+    # **没有任何样例**（只给了 DDL、没贴 INSERT）→ 不猜 random。
+    # 用户反馈：string 列默认 random 插入"很不方便" —— 随机字符串对业务字段
+    # （姓名/地址/备注）毫无意义，还得逐列改回固定值。
+    # 给 const "" 占位：用户一眼看出"这里要填值"，填一个就是 const，填多个不同值
+    # 自然会改成 enum。比 random 更贴合"从建表语句生成草稿"的意图。
+    return "const"
 
 
 def _group_lines(
