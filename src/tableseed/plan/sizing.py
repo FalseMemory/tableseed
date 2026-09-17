@@ -149,10 +149,14 @@ def _plan_rng(config: SeedConfig):
 
 
 def _cap(config: SeedConfig, table, planned: int, name: str, warnings: list[str]) -> int:
-    """套用 max_rows / table.rows 上限，超限则记警告。"""
+    """套用全局 ``limits.max_rows`` 上限，超限则记警告。
+
+    **不用 ``table.rows`` 当上限** —— 用户写 ``rows: 3`` 的意图是"我要 3 行"，
+    不是"最多 3 行"。把它当上限会让组合展开被截断（6 种组合只出 3 行），
+    与生成侧"取满组合数"的语义对不上（用户报过"预估 3 行超过上限 1，将截断"）。
+    所以这里只看全局 ``limits.max_rows``。
+    """
     limit = config.limits.max_rows
-    if table.rows:
-        limit = min(limit, table.rows)
 
     if planned > limit:
         warnings.append(

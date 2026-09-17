@@ -310,9 +310,14 @@ def _finish(table: TableSpec, rows: list[GeneratedRow], truncated: bool) -> Tabl
 
 
 def _resolve_max_rows(config: SeedConfig, table: TableSpec, limit: int | None) -> int:
+    """行数上限。
+
+    ``table.rows`` **不是截断上限** —— 用户写 ``rows: 3`` 的意图是"我要 3 行"，
+    不是"最多 3 行"。把它当上限会让组合展开被截断（6 种组合只出 3 行），
+    预演却按"取满组合数"算，两边对不上（用户报过"预估 3 行超过上限 1，将截断"）。
+    所以这里只看全局 ``limits.max_rows`` 与显式 ``limit``。
+    """
     candidates = [config.limits.max_rows]
-    if table.rows:
-        candidates.append(table.rows)
     if limit:
         candidates.append(limit)
     return min(candidates)

@@ -51,7 +51,11 @@ class Column:
 
 # ---------------------------------------------------------------- DDL 解析
 
+#: 标识符（可带反引号/双引号/中括号引号）
 _IDENT = r"[`\"\[]?(\w+)[`\"\]]?"
+#: 限定名（库名.表名 / 模式.表名）—— 生产库常用 `core_db.t_account` 这种命名，
+#: 只按第一个标识符解析会把表名截成 `core_db`（用户报过）。
+_QUALIFIED = r"[`\"\[]?(\w+)[`\"\]]?(?:\.[`\"\[]?(\w+)[`\"\]]?)?"
 _TYPE_RE = re.compile(
     r"^(?P<base>[A-Za-z]+)\s*(?:\(\s*(?P<p1>\d+)\s*(?:,\s*(?P<p2>\d+))?\s*\))?",
     re.IGNORECASE,
@@ -63,13 +67,14 @@ def parse_create_table(ddl: str) -> tuple[str, list[Column]]:
     if not ddl or not ddl.strip():
         return "", []
 
-    # 表名
+    # 表名：支持 `库名.表名` 限定写法（生产库常用）—— 取**最后一段**作为表名，
+    # 库名只是限定符，不该混进表名（否则 YAML 里表名变成 `core_db`）。
     table_match = re.search(
-        r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?" + _IDENT,
+        r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?" + _QUALIFIED,
         ddl,
         re.IGNORECASE,
     )
-    table_name = table_match.group(1) if table_match else ""
+    table_name = table_match.group(2) or table_match.group(1) if table_match else ""
 
     # 取括号体：第一处 ( 到与之配对的 )
     body_match = re.search(r"\((.*)\)", ddl, re.DOTALL)
@@ -181,17 +186,19 @@ def parse_inserts(sql: str, table: str | None = None) -> dict[str, list[Any]]:
 
     for statement in re.split(r";\s*(?:\n|$)", sql):
         m = re.search(
-            r"INSERT\s+(?:IGNORE\s+)?INTO\s+" + _IDENT + r"\s*\(([^)]*)\)\s*VALUES\s*(.*)",
+            r"INSERT\s+(?:IGNORE\s+)?INTO\s+" + _QUALIFIED + r"\s*\(([^)]*)\)\s*VALUES\s*(.*)",
             statement,
             re.IGNORECASE | re.DOTALL,
         )
         if not m:
             continue
-        insert_table = m.group(1)
+        # 限定名取最后一段（`core_db.t_account` → `t_account`）
+        insert_table = m.group(2) or m.group(1)
         if table and insert_table.lower() != table.lower():
             continue
-        columns = [re.match(_IDENT, c.strip()).group(1) for c in m.group(2).split(",")]
-        rows = _split_top_level(m.group(3).strip())
+        # _QUALIFIED 占 1、2 组，列清单与 VALUES 顺延到 3、4
+        columns = [re.match(_IDENT, c.strip()).group(1) for c in m.group(3).split(",")]
+        rows = _split_top_level(m.group(4).strip())
         for row in rows:
             row = row.strip()
             if row.startswith("(") and row.endswith(")"):
@@ -447,11 +454,14 @@ def _numeric_range(samples: list[Any], cast) -> tuple[int, int]:
 
 
 def insert_table_name(sql: str) -> str:
-    """从 INSERT 语句里取表名（没有则返回空串）。"""
+    """从 INSERT 语句里取表名（没有则返回空串）。
+
+    支持 `库名.表名` 限定写法 —— 取最后一段作为表名。
+    """
     m = re.search(
-        r"INSERT\s+(?:IGNORE\s+)?INTO\s+" + _IDENT, sql or "", re.IGNORECASE
+        r"INSERT\s+(?:IGNORE\s+)?INTO\s+" + _QUALIFIED, sql or "", re.IGNORECASE
     )
-    return m.group(1) if m else ""
+    return (m.group(2) or m.group(1)) if m else ""
 
 
 def _guess_type_from_samples(values: list[Any]) -> str:

@@ -8,7 +8,6 @@ limits:
 
 tables:
   - name: t_txn
-    rows: 1   # 全为逐行组, 行数按此声明（当前 1 行, 要更多改这个数）
     groups:
       - type: sequence
         name: g_txn_no
@@ -19,34 +18,40 @@ tables:
         name: g_txn_type
         fields: [txn_type]
         value: ["Q"]
-      - type: const
+      - type: enum
         name: g_txn_type_desc
         fields: [txn_type_desc]
-        value: [""]
-      - type: const
+        values: [[""], ["存款"]]
+      - type: enum
         name: g_channel
         fields: [channel]
-        value: ["OTC"]
-      - type: const
+        values: [["OTC"], ["EBANK"], ["MOBILE"]]
+      - type: enum
         name: g_currency
         fields: [currency]
-        value: ["HKD"]
-      - type: const
+        values: [["HKD"], ["USD"], ["CNY"]]
+      - type: random
         name: g_amount
         fields: [amount]
-        value: [1491714.43]
-      - type: const
+        generator: decimal
+        range: [22395, 3671419]
+        scale: 2
+      - type: random
         name: g_fee
         fields: [fee]
-        value: [1568.63]
+        generator: decimal
+        range: [162, 3568]
+        scale: 2
       - type: const
         name: g_tenant_id
         fields: [tenant_id]
         value: ["0001"]
-      - type: const
+      - type: random
         name: g_detail_amount_sum
         fields: [detail_amount_sum]
-        value: [1241563.68]
+        generator: decimal
+        range: [187617, 3836373]
+        scale: 2
       - type: const
         name: g_log_count
         fields: [log_count]

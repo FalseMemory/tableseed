@@ -138,3 +138,53 @@ def test_placeholder_is_marked():
                      json={"ddl": "", "inserts": ONLY_INSERT, "table": "t_txn"}).json()
     assert ok["placeholder"] is False
 
+
+# ---------------------------------------------------------------- 限定表名 / 行数语义
+
+
+@allure.story("库名.表名：DDL 与 INSERT 都取最后一段作为表名")
+def test_qualified_table_name():
+    """回归：CREATE TABLE core_db.t_account 曾被解析成表名 `core_db`（`.` 截断）。"""
+    ddl = """CREATE TABLE core_db.t_account (
+      acct_no varchar(32) NOT NULL PRIMARY KEY,
+      balance decimal(18,2)
+    );"""
+    inserts = ("INSERT INTO core_db.t_account (acct_no, balance) "
+               "VALUES ('A0001', 100.50);")
+
+    from tableseed.config.ddl_import import (generate_yaml, insert_table_name,
+                                             parse_create_table)
+
+    assert parse_create_table(ddl)[0] == "t_account"
+    assert insert_table_name(inserts) == "t_account"
+
+    out = generate_yaml(ddl, inserts)
+    config = service.load_text(out)
+    assert config.tables[0].name == "t_account"
+    assert service.check(config) == []
+    # 反引号限定名也要认
+    ddl2 = "CREATE TABLE `mydb`.`t_x` (id bigint PRIMARY KEY);"
+    assert parse_create_table(ddl2)[0] == "t_x"
+
+
+@allure.story("rows 是「我要这么多行」不是「上限」：组合数 > rows 时取满组合数")
+def test_rows_is_target_not_cap():
+    """回归：rows 曾被当成截断上限，组合展开被截断（6 种组合只出 3 行），
+    预演却按「取满组合数」算 —— 两边对不上，还报「预估 6 行超过上限 3，将截断」。"""
+    text = """
+seed: 1
+limits: {max_rows: 100000, strategy: full}
+tables:
+  - name: t_a
+    rows: 3
+    groups:
+      - {type: enum, name: g_s, fields: [status], values: [["01"], ["02"], ["03"]]}
+      - {type: enum, name: g_t, fields: [t], values: [["A"], ["B"]]}
+"""
+    config = service.load_text(text)
+    plan = service.plan(config)
+    result = service.generate(config)
+    # 组合数 6 > rows 3 → 取满 6 行，预演与生成一致，无截断警告
+    assert plan.tables[0].planned_rows == 6
+    assert not plan.warnings
+    assert len(result.tables["t_a"]) == 6
