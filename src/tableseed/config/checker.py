@@ -106,7 +106,15 @@ def _check_table(
         group_path = f"{path}.groups[{index}]({group.name})"
 
         if group.type in FINITE_GROUP_TYPES:
-            if not group.values:
+            if not group.values and group.type == "dict" and group.from_:
+                # dict 曾被设想成"从字典文件取值"（前端也这么写），但后端
+                # 一直把 dict 当有限取值组。给出明确的迁移路径而不是干巴巴一句
+                # "必须提供 values"。
+                problems.append(
+                    f"{group_path}: dict 组与 enum 同族，用 values 提供取值列表；"
+                    "想从文件按行取值请改用表达式函数 dict_(\"路径\", index)"
+                )
+            elif not group.values:
                 problems.append(f"{group_path}: 有限取值组必须提供 values")
             else:
                 for pos, item in enumerate(group.values):

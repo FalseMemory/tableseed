@@ -59,8 +59,18 @@ def verify_invariants(
                     else:
                         ok = _eval_row_level(invariant, row, funcs, index)
                 except ExprError as exc:
+                    # 带上**表名**与可操作建议：不变量不写 table 时会对所有表求值，
+                    # 其中某张表没有该字段就报"未知变量 x" —— 用户看不出是哪张表
+                    hint = ""
+                    if invariant.table is None:
+                        hint = (
+                            f"（未指定 table 时会对所有表求值，"
+                            f"表 {table.name} 里没有该字段 —— "
+                            "若只想校验部分表，请显式写 table: <表名>）"
+                        )
                     raise GenerateError(
-                        f"invariants[{index}] 求值失败: {exc}", f"invariants[{index}]"
+                        f"invariants[{index}] 在表 {table.name} 上求值失败: {exc}{hint}",
+                        f"invariants[{index}]",
                     ) from exc
 
                 if not ok:

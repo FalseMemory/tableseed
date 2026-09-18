@@ -811,3 +811,67 @@ def test_module_entrypoint():
     )
     assert proc.returncode == 0, f"stdout={proc.stdout[:200]} stderr={proc.stderr[:200]}"
     assert "gen" in proc.stdout and "verify" in proc.stdout
+
+
+# ---------------------------------------------------------------- 组类型语义 / 提示可操作性
+
+
+@allure.story("dict 组与 enum 同族：用 values 提供取值（前端曾误写成 from）")
+def test_dict_group_uses_values():
+    """回归：前端 GROUP_KEYS 把 dict 写成 from（早期"从字典文件取值"的设想），
+    后端却一直按有限取值组处理 —— 用户在编辑器里选 dict 组必然失败。"""
+    text = """
+seed: 1
+limits: {max_rows: 100, strategy: full}
+tables:
+  - name: t_a
+    groups:
+      - {type: dict, name: g_d, fields: [code], values: [["01"], ["02"], ["03"]]}
+"""
+    config = service.load_text(text)
+    assert service.check(config) == []
+    rows = service.generate(config).tables["t_a"].rows
+    assert [r.values["code"] for r in rows] == ["01", "02", "03"]
+
+
+@allure.story("dict 组按旧语义写 from：给出可操作的迁移提示")
+def test_dict_group_old_semantics_hint():
+    text = """
+seed: 1
+limits: {max_rows: 100, strategy: full}
+tables:
+  - name: t_a
+    rows: 2
+    groups:
+      - {type: dict, name: g_d, fields: [code], from: '/tmp/x.txt'}
+"""
+    problems = service.check(service.load_text(text))
+    assert problems, "旧语义要被拦下"
+    joined = " ".join(problems)
+    assert "values" in joined and "dict_" in joined, (
+        f"提示要说明改用 values 或表达式函数 dict_: {problems}"
+    )
+
+
+@allure.story("不变量未指定 table 时的报错要指出是哪张表 + 怎么写才对")
+def test_invariant_default_table_hint():
+    text = """
+seed: 1
+limits: {max_rows: 100, strategy: full}
+tables:
+  - name: t_a
+    rows: 2
+    groups:
+      - {type: random, name: g_x, fields: [x], generator: int, range: [1, 9]}
+  - name: t_b
+    rows: 2
+    groups:
+      - {type: random, name: g_y, fields: [y], generator: int, range: [1, 9]}
+invariants:
+  - expr: "x > 0"
+"""
+    with pytest.raises(TableSeedError) as exc:
+        service.verify(service.load_text(text))
+    msg = str(exc.value)
+    assert "t_b" in msg, f"要指出是哪张表缺字段: {msg}"
+    assert "table:" in msg, f"要告诉用户显式写 table: {msg}"

@@ -900,7 +900,11 @@ const GROUP_TYPES = ["enum", "boundary", "dict", "sequence", "random", "const", 
 const GROUP_KEYS = {
   enum:     ["values"],
   boundary: ["values"],
-  dict:     ["from"],
+  // dict 与 enum 同族：都是**有限取值组**（后端 FINITE_GROUP_TYPES），参数是 values。
+  // 曾经这里写的是 from（早期设想"从字典文件取值"），与后端不一致 ——
+  // 用户在编辑器里选 dict 组填文件路径，保存必然报「有限取值组必须提供 values」。
+  // 想从文件取值请用表达式函数 dict_("路径", index)。
+  dict:     ["values"],
   sequence: ["start", "format"],
   random:   ["generator", "range", "scale"],
   const:    ["value"],
