@@ -875,3 +875,34 @@ invariants:
     msg = str(exc.value)
     assert "t_b" in msg, f"要指出是哪张表缺字段: {msg}"
     assert "table:" in msg, f"要告诉用户显式写 table: {msg}"
+
+
+# ---------------------------------------------------------------- 文件编码
+
+
+CONFIG_TEXT = (
+    "seed: 1\n"
+    "tables:\n"
+    "  - name: t_a\n"
+    "    rows: 1\n"
+    "    groups:\n"
+    "      - {type: const, name: g_x, fields: [x], value: ['中文值']}\n"
+)
+
+
+@allure.story("GBK（Windows 记事本 ANSI）配置能读；无法识别的编码给可读错误")
+def test_config_file_encoding(tmp_path):
+    """回归：GBK 文件按 UTF-8 读会抛**未包装**的 UnicodeDecodeError ——
+    CLI 打堆栈、Web 层 500，用户只看到"崩了"。"""
+    for enc in ("utf-8", "gbk"):
+        target = tmp_path / f"{enc}.yaml"
+        target.write_bytes(CONFIG_TEXT.encode(enc))
+        config = service.load(target)
+        result = service.generate(config)
+        assert result.tables["t_a"].rows[0].values["x"] == "中文值"
+
+    # 既非 UTF-8 也非 GBK
+    bad = tmp_path / "binary.yaml"
+    bad.write_bytes(bytes(range(128, 256)) * 4)
+    with pytest.raises(TableSeedError, match="编码"):
+        service.load(bad)
