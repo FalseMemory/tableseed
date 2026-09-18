@@ -622,7 +622,16 @@ def create_app(config_path: str | None = None) -> FastAPI:
         incomplete = set(data["incomplete"])
         connections = {}
         for name, fields in data["connections"].items():
-            entry = {**fields, "complete": name not in incomplete}
+            # **绝不下发明文密码**：原来 `{**fields}` 把 password 一起回传，
+            # 页面源码 / 开发者工具 / 网络面板 / 截图里都能看到用户真实密码。
+            # 改成只给"是否已配置"标记 —— 前端编辑时密码框留空即表示不修改。
+            safe = {k: v for k, v in fields.items() if k != "password"}
+            entry = {
+                **safe,
+                "password_set": bool(fields.get("password")) or bool(fields.get("password_env")),
+                "password_env_set": bool(fields.get("password_env")),
+                "complete": name not in incomplete,
+            }
             try:
                 spec = DatabaseSpec.model_validate(fields)
             except ValidationError as exc:
@@ -648,13 +657,26 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     @app.put("/api/connections")
     def put_connection(payload: dict[str, Any]) -> dict[str, Any]:
-        """新增/更新一个连接。name 为连接名，其余为连接字段。"""
+        """新增/更新一个连接。name 为连接名，其余为连接字段。
+
+        **密码留空 = 不修改**：GET /api/connections 不再下发明文密码，
+        所以前端编辑已有连接时密码框是空的。这里把"空密码"解释成
+        "沿用原密码"，而不是把用户已保存的密码清成空串。
+        """
         from ..config.connections import ConnectionsStore  # noqa: PLC0415
 
         name = payload.get("name")
         fields = {k: v for k, v in payload.items() if k != "name" and v is not None}
+
+        store = ConnectionsStore()
+        if not str(fields.get("password") or "").strip():
+            fields.pop("password", None)
+            existing = (store.load()["connections"].get(name or "") or {})
+            if existing.get("password"):
+                fields["password"] = existing["password"]
+
         try:
-            ConnectionsStore().save(name or "", fields)
+            store.save(name or "", fields)
         except TableSeedError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         state.log_operation("保存连接", f"连接 {name}（{spec_mask(fields)}）")

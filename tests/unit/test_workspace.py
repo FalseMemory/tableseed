@@ -156,3 +156,99 @@ def test_connections_and_workspace_coexist(tmp_path, monkeypatch):
     client.put("/api/connections", json={
         "name": "prod", "type": "mysql", "host": "h2", "user": "u", "database": "d2"})
     assert client.get("/api/workspace").json()["active"] == "samples/a.yaml"
+
+
+@allure.story("连接接口绝不下发明文密码（页面/开发者工具/截图都会泄露）")
+def test_connections_never_leak_password(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(create_app())
+
+    client.put("/api/connections", json={
+        "name": "prod", "type": "mysql", "host": "127.0.0.1", "port": 3306,
+        "user": "root", "password": "S3cret!Pass", "database": "db",
+    })
+    res = client.get("/api/connections")
+    assert res.status_code == 200
+    body = res.text
+    assert "S3cret!Pass" not in body, "明文密码不能出现在响应里"
+    entry = res.json()["connections"]["prod"]
+    assert "password" not in entry, f"不该回传 password 字段: {entry}"
+    assert entry["password_set"] is True, "要给出「已配置」标记供前端提示"
+
+
+@allure.story("密码留空保存 = 不修改（前端不回填明文，留空不该清掉密码）")
+def test_blank_password_keeps_existing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(create_app())
+
+    client.put("/api/connections", json={
+        "name": "prod", "type": "mysql", "host": "127.0.0.1",
+        "user": "root", "password": "origin", "database": "db",
+    })
+    # 编辑时只改 host、密码框留空（前端不发明文密码）
+    client.put("/api/connections", json={
+        "name": "prod", "type": "mysql", "host": "10.0.0.9",
+        "user": "root", "password": "", "database": "db",
+    })
+
+    import configparser
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.read("config.ini", encoding="utf-8")
+    assert parser["prod"]["password"] == "origin", "留空不该覆盖已保存的密码"
+    assert parser["prod"]["host"] == "10.0.0.9", "其他字段要正常更新"
+
+    # 显式给新密码则更新
+    client.put("/api/connections", json={
+        "name": "prod", "type": "mysql", "host": "10.0.0.9",
+        "user": "root", "password": "newpwd", "database": "db",
+    })
+    parser.read("config.ini", encoding="utf-8")
+    assert parser["prod"]["password"] == "newpwd"
+
+
+@allure.story("连接接口绝不下发明文密码（页面/开发者工具/截图都会泄露）")
+def test_connections_never_leak_password(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(create_app())
+
+    client.put("/api/connections", json={
+        "name": "prod", "type": "mysql", "host": "127.0.0.1", "port": 3306,
+        "user": "root", "password": "S3cret!Pass", "database": "db",
+    })
+    res = client.get("/api/connections")
+    assert res.status_code == 200
+    body = res.text
+    assert "S3cret!Pass" not in body, "明文密码不能出现在响应里"
+    entry = res.json()["connections"]["prod"]
+    assert "password" not in entry, f"不该回传 password 字段: {entry}"
+    assert entry["password_set"] is True, "要给出「已配置」标记供前端提示"
+
+
+@allure.story("密码留空保存 = 不修改（前端不回填明文，留空不该清掉密码）")
+def test_blank_password_keeps_existing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(create_app())
+
+    client.put("/api/connections", json={
+        "name": "prod", "type": "mysql", "host": "127.0.0.1",
+        "user": "root", "password": "origin", "database": "db",
+    })
+    # 编辑时只改 host、密码框留空（前端不发明文密码）
+    client.put("/api/connections", json={
+        "name": "prod", "type": "mysql", "host": "10.0.0.9",
+        "user": "root", "password": "", "database": "db",
+    })
+
+    import configparser
+    parser = configparser.ConfigParser(interpolation=None)
+    parser.read("config.ini", encoding="utf-8")
+    assert parser["prod"]["password"] == "origin", "留空不该覆盖已保存的密码"
+    assert parser["prod"]["host"] == "10.0.0.9", "其他字段要正常更新"
+
+    # 显式给新密码则更新
+    client.put("/api/connections", json={
+        "name": "prod", "type": "mysql", "host": "10.0.0.9",
+        "user": "root", "password": "newpwd", "database": "db",
+    })
+    parser.read("config.ini", encoding="utf-8")
+    assert parser["prod"]["password"] == "newpwd"
