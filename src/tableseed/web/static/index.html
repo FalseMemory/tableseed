@@ -1602,17 +1602,27 @@ function downloadInsertSql() {
 
 const DB_DEFAULT_PORT = { mysql: 3306, postgresql: 5432, oracle: 1521 };
 
+//: 与服务端 _PASSWORD_MASK 对应 —— 密码框回填的就是它
+const PASSWORD_MASK = "********";
+
 function dbForm() {
-  return {
+  const pwd = $("db-password").value;
+  const form = {
+    // 带连接名：服务端据此取"这条连接已保存的密码"去连库
+    name: $("db-conn-select").value || null,
     type: $("db-type").value,
     host: $("db-host").value.trim(),
     port: parseInt($("db-port").value, 10) || null,
     user: $("db-user").value.trim(),
-    password: $("db-password").value,
     password_env: $("db-password-env").value.trim() || null,
     database: $("db-name").value.trim(),
     charset: $("db-charset").value.trim() || null,
   };
+  // 掩码只是"已保存"的显示，绝不能当密码发出去 ——
+  // 否则测试连接/入库/SQL 台会拿 ******** 去连 MySQL，报"用户名或密码不正确"。
+  // 留空同样不发：两种情况都由服务端用该连接已存的密码。
+  if (pwd && pwd !== PASSWORD_MASK) form.password = pwd;
+  return form;
 }
 
 function dbReady() {

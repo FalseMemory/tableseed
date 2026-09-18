@@ -109,6 +109,9 @@ class DdlPayload(BaseModel):
 class DatabasePayload(BaseModel):
     """保存到配置的数据库连接（结构化字段）。"""
 
+    #: 连接的保存名。前端密码框只显示掩码、不回传真实密码，
+    #: 所以带 name 过来，服务端才能用"这条连接已保存的密码"去连。
+    name: str | None = None
     type: str | None = None
     host: str | None = None
     port: int | None = None
@@ -118,6 +121,57 @@ class DatabasePayload(BaseModel):
     database: str | None = None
     charset: str | None = None
     url: str | None = None
+
+
+#: 密码掩码：前端回填它表示"已保存"，服务端见到它就当"没给密码"
+PASSWORD_MASK = _PASSWORD_MASK
+
+
+def resolve_saved_password(fields: dict[str, Any], name: str | None) -> dict[str, Any]:
+    """把"没有密码 / 密码是掩码"的连接字段，补上该连接**已保存的密码**。
+
+    为什么需要：密码框回填的是掩码（不泄露明文），但**测试连接 / 入库 /
+    SQL 台 / 取建表语句**都要拿真实密码去连库。这些接口原先直接拿表单值
+    当密码，于是把 `********` 当密码送进 MySQL —— 报
+    "Access denied（用户名或密码不正确）"，而用户看着密码框里的掩码
+    完全找不到原因。
+    """
+    result = dict(fields or {})
+    # name 只是"用哪条连接的已存密码"的依据，不进 DatabaseSpec
+    # （模型拒绝未知字段，漏剔会报 extra_forbidden）
+    result.pop("name", None)
+    given = str(result.get("password") or "").strip()
+    if given and given != _PASSWORD_MASK:
+        return result          # 用户真的输了新密码
+    result.pop("password", None)
+    if result.get("password_env"):
+        return result          # 走环境变量，不需要补明文
+
+    from ..config.connections import ConnectionsStore  # noqa: PLC0415
+
+    candidates: list[str] = []
+    if name:
+        candidates.append(name)
+    try:
+        store = ConnectionsStore()
+        active = store.load().get("active")
+        if active and active not in candidates:
+            candidates.append(active)
+    except TableSeedError:
+        pass
+
+    for candidate in candidates:
+        try:
+            saved = ConnectionsStore().load()["connections"].get(candidate) or {}
+        except TableSeedError:
+            continue
+        if saved.get("password"):
+            result["password"] = saved["password"]
+            return result
+        if saved.get("password_env"):
+            result["password_env"] = saved["password_env"]
+            return result
+    return result
 
 
 class AppState:
@@ -855,7 +909,10 @@ def create_app(config_path: str | None = None) -> FastAPI:
         from ..models import DatabaseSpec  # noqa: PLC0415
 
         try:
-            spec = DatabaseSpec.model_validate(payload.model_dump(exclude_none=True))
+            fields = resolve_saved_password(
+                payload.model_dump(exclude_none=True), payload.name
+            )
+            spec = DatabaseSpec.model_validate(fields)
         except Exception as exc:
             return {"ok": False, "message": f"连接信息不完整或有误：{exc}"}
 
@@ -1063,7 +1120,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
         from ..sink import DbSink  # noqa: PLC0415
         from ..models import DatabaseSpec  # noqa: PLC0415
 
-        fields = payload.get("database") or {}
+        fields = resolve_saved_password(payload.get("database") or {},
+                                        payload.get("name"))
         spec = DatabaseSpec.model_validate(fields) if fields else (
             _current_config(state).database if _current_config(state) and _current_config(state).database else DatabaseSpec()
         )
@@ -1259,12 +1317,19 @@ def _graph_edges(config: SeedConfig) -> list[dict[str, Any]]:
 
 
 def _resolve_url(
-    state: AppState, dsn: str | None, database: dict[str, Any] | None
+    state: AppState,
+    dsn: str | None,
+    database: dict[str, Any] | None,
+    name: str | None = None,
 ) -> str | None:
     """按优先级取连接串：显式 dsn → 页面表单 → config.ini 激活连接 → YAML database 段。
 
     连接信息已迁移到 config.ini（与业务规则分离，配置可随便分享）；
     YAML 的 database 段仅为兼容旧配置保留，不再推荐。
+
+    **表单里的密码是掩码时，用该连接已保存的真实密码**（见
+    resolve_saved_password）—— 否则入库 / SQL 台 / 取建表语句都会把
+    `********` 当密码送去连库，报"用户名或密码不正确"。
     """
     if dsn:
         return dsn
@@ -1272,7 +1337,7 @@ def _resolve_url(
         from ..models import DatabaseSpec  # noqa: PLC0415
 
         try:
-            spec = DatabaseSpec.model_validate(database)
+            spec = DatabaseSpec.model_validate(resolve_saved_password(database, name))
         except Exception as exc:
             raise HTTPException(
                 status_code=400, detail=f"连接信息不完整或有误: {exc}"
