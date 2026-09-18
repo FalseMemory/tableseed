@@ -47,14 +47,23 @@ def _agg_count(values: list[Any]) -> int:
     return len([v for v in values if v is not None])
 
 
-def _agg_sum(values: list[Any]) -> float:
-    return sum(_to_num(v) for v in values)
+def _agg_sum(values: list[Any]) -> Any:
+    """精确求和（Decimal）—— 对账断言的核心。
+
+    用 float 累加时 ``6805.01 + 646.27 + 378.83`` 得 ``7830.110000000001``，
+    与父表 ``7830.11`` 不等，用户写 ``sum(net_amount) = amount`` 会看到
+    误报的"违例"（数据其实完全正确）。走 Decimal 才是对账该有的精度。
+    """
+    from .functions import _sum
+
+    return _sum(values)
 
 
-def _agg_avg(values: list[Any]) -> float:
-    if not values:
-        return 0
-    return _agg_sum(values) / len(values)
+def _agg_avg(values: list[Any]) -> Any:
+    """精确平均（Decimal）；空集返回 None（与 SQL AVG 语义一致）。"""
+    from .functions import _avg
+
+    return _avg(values)
 
 
 def _agg_min(values: list[Any]) -> Any:

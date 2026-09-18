@@ -7,11 +7,27 @@
 from __future__ import annotations
 
 import ast
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from ..errors import ExprError
 from .functions import FunctionMap
 from .parser import compile_expr
+
+
+def _is_number(value: Any) -> bool:
+    """数值（排除 bool —— Python 里 bool 是 int 的子类，但业务上不是数值）。"""
+    return isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
+
+
+def _as_decimal(value: Any) -> Decimal:
+    """数值 → Decimal，走 ``str()`` 避开 float 的二进制误差。"""
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ExprError(f"无法解析为数值: {value!r}") from exc
 
 
 class AttrDict(dict):
@@ -104,13 +120,22 @@ class Evaluator:
         left = self._eval(node.left, env)
         right = self._eval(node.right, env)
         op = node.op
+
+        # 只有**其中一边已是 Decimal**时才统一为 Decimal（聚合结果参与算术的场景，
+        # 例如 sum(x) * 1.1 —— 否则 Decimal × float 会抛 TypeError）。
+        # 两边都是 float 时保持原样：不改变生成数据的值类型，
+        # 用户拿到的字段值该是 float 就还是 float。
+        if (_is_number(left) and _is_number(right)
+                and (isinstance(left, Decimal) or isinstance(right, Decimal))):
+            left, right = _as_decimal(left), _as_decimal(right)
+
         # ---- 规模防护：手滑写出的超大数/超长字符串会让进程卡死甚至吃爆内存 ----
         # 例：`10**10**10` 会让服务 CPU 打满、整个页面无响应（用户只能杀进程）。
-        if isinstance(op, ast.Pow) and isinstance(right, (int, float)) and abs(right) > 1000:
+        if isinstance(op, ast.Pow) and isinstance(right, (int, float, Decimal)) and abs(right) > 1000:
             raise ExprError(f"幂运算指数过大（{right}）—— 会产生超大数，请检查表达式")
-        if isinstance(op, ast.Pow) and isinstance(left, (int, float)) and isinstance(right, int):
+        if isinstance(op, ast.Pow) and _is_number(left) and isinstance(right, (int, Decimal)):
             digits = len(str(abs(int(left)))) if left else 1
-            if digits * right > 10_000:
+            if digits * int(right) > 10_000:
                 raise ExprError("幂运算结果过大 —— 请检查表达式")
         if isinstance(op, ast.Mult):
             for text, times in ((left, right), (right, left)):
@@ -160,6 +185,16 @@ class Evaluator:
             return left is right
         if isinstance(op, ast.IsNot):
             return left is not right
+
+        # 比较时若有一边是 Decimal（聚合结果），另一边转 Decimal 再比 ——
+        # 否则 `sum(x) = amount` 会被 float 累加误差误判（6805.01+646.27+378.83
+        # = 7830.110000000001 ≠ 7830.11），用户的业务对账断言全是假的"违例"。
+        # 两边都是 float 时按原样比较，不改变既有语义。
+        if isinstance(op, (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)):
+            if (_is_number(left) and _is_number(right)
+                    and (isinstance(left, Decimal) or isinstance(right, Decimal))):
+                left, right = _as_decimal(left), _as_decimal(right)
+
         if isinstance(op, ast.Eq):
             return left == right
         if isinstance(op, ast.NotEq):

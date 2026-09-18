@@ -39,6 +39,45 @@ def _to_num(value: Any) -> float:
         raise ExprError(f"无法解析为数值: {value!r}") from exc
 
 
+def _to_decimal(value: Any) -> Any:
+    """转 Decimal 做精确算术 —— 走 ``str()`` 而不是 ``Decimal(float)``。
+
+    这是**对账类断言能不能用**的关键：
+    ``6805.01 + 646.27 + 378.83`` 用 float 加出来是 ``7830.110000000001``，
+    与父表金额 ``7830.11`` 不等 —— 用户写 ``sum(net_amount) = amount``
+    会看到误报的"违例"，而数据其实完全正确。
+    """
+    from decimal import Decimal, InvalidOperation
+
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, bool):
+        return Decimal(int(value))
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ExprError(f"无法解析为数值: {value!r}") from exc
+
+
+def _sum(items: Any) -> Any:
+    """精确求和（Decimal）—— 见 _to_decimal 的说明。"""
+    total = None
+    for item in items:
+        if item is None:
+            continue
+        number = _to_decimal(item)
+        total = number if total is None else total + number
+    return total if total is not None else 0
+
+
+def _avg(items: Any) -> Any:
+    """精确平均值（Decimal）；空集返回 None（与 SQL AVG 语义一致）。"""
+    numbers = [_to_decimal(x) for x in items if x is not None]
+    if not numbers:
+        return None
+    return _sum(numbers) / len(numbers)
+
+
 def _like(value: Any, pattern: str) -> bool:
     """SQL LIKE 语义：``%`` 匹配任意长度，``_`` 匹配单个字符。"""
     import re
@@ -139,7 +178,7 @@ def build_functions(
         "dict_": _dict_lookup,
         # ---- 聚合（供 aggregate 组与 invariants 使用）----
         "count": lambda items: len(list(items)),
-        "sum": lambda items: builtins.sum(_to_num(x) for x in items),
+        "sum": lambda items: _sum(items),
         "avg": lambda items: _avg(items),
         "min": lambda items: builtins.min(items),
         "max": lambda items: builtins.max(items),
@@ -173,11 +212,6 @@ def _substr(s: Any, start: int, length: int | None = None) -> str | None:
     return text[begin : begin + int(length)]
 
 
-def _avg(items: Any) -> float:
-    values = [_to_num(x) for x in items]
-    if not values:
-        raise ExprError("avg 的输入为空")
-    return builtins.sum(values) / len(values)
 
 
 def _timestampdiff(unit: Any, a: Any, b: Any) -> int:

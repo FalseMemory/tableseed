@@ -699,3 +699,115 @@ def test_config_table_lookup_error():
     config = service.load_text("seed: 1\ntables: []\n")
     with pytest.raises(TableSeedError, match="表不存在"):
         config.table("nope")
+
+
+# ---------------------------------------------------------------- 对账精度 / 入口 / 方言
+
+
+SPLIT_CONSERVATION_CFG = """
+seed: 7
+limits: {max_rows: 10000, strategy: full}
+tables:
+  - name: t_order
+    groups:
+      - {type: enum, name: g_o, fields: [ono], values: [["O1"], ["O2"]]}
+      - {type: random, name: g_a, fields: [amount], generator: decimal, range: [1000, 9999], scale: 2}
+  - name: t_detail
+    groups:
+      - {type: random, name: g_n, fields: [net_amount], generator: decimal, range: [10, 99], scale: 2}
+relations:
+  - parent: t_order
+    child: t_detail
+    cardinality: "1:N"
+    join: [{parent_field: ono, child_field: ono}]
+    propagate:
+      - {mode: split, to: net_amount, from: amount, parts: 3}
+invariants:
+  - {table: t_order, from: t_detail, expr: "sum(net_amount) = amount"}
+  - {table: t_order, from: t_detail, expr: "sum(net_amount) * 1.1 > 0"}
+"""
+
+
+@allure.story("对账断言不能被浮点误差误报（Decimal 精确求和的真正用途）")
+def test_reconciliation_assertion_is_exact():
+    """用户写 sum(net_amount) = amount 是核心用法。
+
+    float 累加下 6805.01+646.27+378.83 = 7830.110000000001 ≠ 7830.11 ——
+    数据完全正确却报"违例"。聚合与比较都必须走 Decimal。
+    """
+    assert service.verify(service.load_text(SPLIT_CONSERVATION_CFG)) == [], (
+        "守恒的数据不该被判违例"
+    )
+    # 真不守恒仍要抓到（不是"一律放行"）
+    broken = SPLIT_CONSERVATION_CFG.replace('= amount"', "= amount + 0.01\"")
+    assert service.verify(service.load_text(broken)), "真不守恒必须报违例"
+
+
+@allure.story("精度修复不改变出参类型：字段值仍是 float，不混入 Decimal")
+def test_value_types_stay_plain():
+    from decimal import Decimal
+
+    # aggregate 回填
+    agg_cfg = """
+seed: 1
+limits: {max_rows: 100, strategy: full}
+tables:
+  - name: t_p
+    groups:
+      - {type: enum, name: g_p, fields: [pid], values: [["P1"]]}
+      - {type: aggregate, name: g_sum, fields: [total], from: t_c, expr: "sum(net)"}
+  - name: t_c
+    groups:
+      - {type: random, name: g_n, fields: [net], generator: decimal, range: [1, 99], scale: 2}
+relations:
+  - parent: t_p
+    child: t_c
+    cardinality: "1:N"
+    join: [{parent_field: pid, child_field: cid}]
+"""
+    row = service.generate(service.load_text(agg_cfg)).tables["t_p"].rows[0]
+    assert not isinstance(row.values["total"], Decimal), (
+        f"aggregate 回填值该是 float，实际 {type(row.values['total']).__name__}"
+    )
+
+    # derive 算术
+    drv_cfg = """
+seed: 1
+limits: {max_rows: 100, strategy: full}
+tables:
+  - name: t_c
+    rows: 3
+    groups:
+      - {type: random, name: g_n, fields: [net], generator: decimal, range: [1, 99], scale: 2}
+      - {type: derive, name: g_d, fields: [tax], expr: "net * 0.06"}
+"""
+    rows = service.generate(service.load_text(drv_cfg)).tables["t_c"].rows
+    assert all(not isinstance(r.values["tax"], Decimal) for r in rows)
+
+
+@allure.story("未知方言必须报错（静默回退会用错标识符引用符）")
+def test_unknown_dialect_rejected():
+    from tableseed.render import normalize_dialect
+
+    for good, expect in (("mysql", "mysql"), ("POSTGRES", "postgresql"),
+                         ("pg", "postgresql"), ("mariadb", "mysql"),
+                         (None, "postgresql")):
+        assert normalize_dialect(good) == expect
+
+    for bad in ("nosql", "postgresql8", "sqlserver", "oracl"):
+        with pytest.raises(TableSeedError, match="不支持的方言"):
+            normalize_dialect(bad)
+
+
+@allure.story("python -m tableseed 可用（源码目录里没装 console script 时的唯一入口）")
+def test_module_entrypoint():
+    """回归：缺 __main__.py 时报 No module named tableseed.__main__。"""
+    import subprocess
+    import sys
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "tableseed", "--help"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout[:200]} stderr={proc.stderr[:200]}"
+    assert "gen" in proc.stdout and "verify" in proc.stdout

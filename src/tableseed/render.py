@@ -11,6 +11,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
+from .errors import ConfigError
 from .models import TableData
 
 _IDENT_QUOTE: dict[str, str] = {
@@ -29,9 +30,26 @@ _DIALECT_ALIASES: dict[str, str] = {
 }
 
 
+#: 支持的方言（其他一律拒绝 —— 静默回退到双引号会让生成的 SQL 用错引用符，
+#: 到目标库执行才报语法错，排查成本很高）
+_DIALECTS = ("mysql", "postgresql", "oracle")
+
+
 def normalize_dialect(dialect: str | None) -> str:
-    key = (dialect or "postgresql").lower()
-    return _DIALECT_ALIASES.get(key, key)
+    """规范化方言名；未知方言抛可读错误。
+
+    曾经是 ``_ALIASES.get(key, key)`` —— 未知值原样返回，渲染时静默用双引号兜底。
+    用户把 ``postgresql`` 打成 ``postgresql8`` 之类，会拿到一份看似正常、
+    实际用错标识符引用符的 SQL（MySQL 上 ``"col"`` 会被当字符串）。
+    """
+    key = (dialect or "postgresql").lower().strip()
+    key = _DIALECT_ALIASES.get(key, key)
+    if key not in _DIALECTS:
+        raise ConfigError(
+            f"不支持的方言: {dialect!r} —— 可用: {' / '.join(_DIALECTS)}"
+            f"（也接受别名: {', '.join(sorted(_DIALECT_ALIASES))}）"
+        )
+    return key
 
 
 def quote_ident(identifier: str, dialect: str) -> str:

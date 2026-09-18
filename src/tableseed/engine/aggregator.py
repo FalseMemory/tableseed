@@ -125,13 +125,26 @@ def _backfill_group(
     return warnings
 
 
+def _plain(value: Any) -> Any:
+    """写回字段值前把 Decimal 归一为 float。
+
+    表达式内部用 Decimal 保证精确（`sum(net) = amount` 这类对账断言不会被
+    float 累加误差误报），但**落到字段值时要和 random / derive 产出的 float
+    保持一致** —— 否则同一张表里有的列是 float、有的是 Decimal，
+    CSV/JSON/DataFrame 导出与用户断言都会受影响。
+    """
+    from decimal import Decimal
+
+    return float(value) if isinstance(value, Decimal) else value
+
+
 def _assign(group: GroupSpec, row: GeneratedRow, result: Any, path: str) -> None:
     if len(group.fields) == 1:
-        row.values[group.fields[0]] = result
+        row.values[group.fields[0]] = _plain(result)
         return
     if isinstance(result, (list, tuple)) and len(result) == len(group.fields):
         for field, value in zip(group.fields, result):
-            row.values[field] = value
+            row.values[field] = _plain(value)
         return
     raise GenerateError(
         f"aggregate 组 {group.name} 有 {len(group.fields)} 个字段，"
