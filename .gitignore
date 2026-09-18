@@ -38,3 +38,6 @@ Thumbs.db
 logs/
 config.ini
 .tmp/mysql3307/
+
+# 用户导入的配置文件（别人发来的 yaml 会落在这里，不该进仓库）
+imports/
