@@ -1,0 +1,58 @@
+# 未提供建表语句 —— 列与类型由 INSERT 样例推断, 字段分组为草稿, 请按需调整
+# 表: t_txn  生成时间标记见 seed
+seed: 20260910
+
+limits:
+  max_rows: 100000
+  strategy: full
+
+tables:
+  - name: t_txn
+    groups:
+      - type: sequence
+        name: g_txn_no
+        fields: [txn_no]
+        start: 1
+        format: "txn_no_{seq:06d}"
+      - type: const
+        name: g_txn_type
+        fields: [txn_type]
+        value: ["Q"]
+      - type: enum
+        name: g_txn_type_desc
+        fields: [txn_type_desc]
+        values: [[""], ["存款"]]
+      - type: enum
+        name: g_channel
+        fields: [channel]
+        values: [["OTC"], ["EBANK"], ["MOBILE"]]
+      - type: enum
+        name: g_currency
+        fields: [currency]
+        values: [["HKD"], ["USD"], ["CNY"]]
+      - type: random
+        name: g_amount
+        fields: [amount]
+        generator: decimal
+        range: [22395, 3671419]
+        scale: 2
+      - type: random
+        name: g_fee
+        fields: [fee]
+        generator: decimal
+        range: [162, 3568]
+        scale: 2
+      - type: const
+        name: g_tenant_id
+        fields: [tenant_id]
+        value: ["0001"]
+      - type: random
+        name: g_detail_amount_sum
+        fields: [detail_amount_sum]
+        generator: decimal
+        range: [187617, 3836373]
+        scale: 2
+      - type: const
+        name: g_log_count
+        fields: [log_count]
+        value: [null]

@@ -30,6 +30,10 @@ _APP_STARTED_AT = time.strftime("%Y-%m-%d %H:%M:%S")
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+#: 连接密码的**定长掩码** —— 前端回填它表示"已有密码"，
+#: 保存时收到同样的值就视为"不修改"。定长是关键：不泄露真实长度。
+_PASSWORD_MASK = "********"
+
 DEFAULT_CONFIG = """\
 # tableseed —— 造数配置
 # 每个字段必须归属一个组（不重不漏）；有限取值组之间做笛卡尔积。
@@ -225,6 +229,39 @@ class AppState:
         self.text = text
         self.inserted_fingerprint = None
         return clean
+
+    def import_path(self, source: str) -> str:
+        """把**外部绝对路径**的配置文件复制进项目并切换绑定。
+
+        配置会话是"文件绑定"模型（要保持可回读、可另存），所以外部文件先复制
+        到 ``imports/`` 下再绑定 —— 不直接绑定项目外的路径，避免后续
+        重载/另存时被路径规范拒绝。重名自动加序号，不覆盖已有文件。
+        """
+        import shutil  # noqa: PLC0415
+
+        src = Path(source)
+        target = Path("imports") / src.name
+        if not target.suffix:
+            target = target.with_suffix(".yaml")
+        if target.exists() and target.resolve() != src.resolve():
+            stem, suffix = target.stem, target.suffix
+            index = 2
+            while (Path("imports") / f"{stem}-{index}{suffix}").exists():
+                index += 1
+            target = Path("imports") / f"{stem}-{index}{suffix}"
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.resolve() != src.resolve():
+            shutil.copy2(src, target)
+
+        # 用与 load_config 相同的编码回退逻辑读取（GBK 也能进）
+        from ..config.loader import load_config_text_from_file  # noqa: PLC0415
+
+        text = load_config_text_from_file(target)
+        self.config_path = str(target).replace("\\", "/")
+        self.text = text
+        self.inserted_fingerprint = None
+        return self.config_path
 
     def parse(self, text: str) -> SeedConfig:
         return service.load_text(text, source=self.config_path or "<webui>")
@@ -538,6 +575,93 @@ def create_app(config_path: str | None = None) -> FastAPI:
         state.log_operation("另存为", f"配置另存为 {clean}")
         return {"ok": True, "path": clean, "text": state.text}
 
+    @app.post("/api/workspace/import")
+    def import_workspace(payload: dict[str, Any]) -> dict[str, Any]:
+        """导入一份外部 YAML 配置（浏览器选文件后把内容送进来）。
+
+        为什么必须有这条路：别人发来一个 yaml、或从别处下载了一个 ——
+        原来的"加载"只能从**项目内的清单**里选，外部文件根本进不来。
+        这里把内容落到 `imports/` 下（重名自动加序号，绝不覆盖已有文件），
+        加入清单并切为当前配置。
+        """
+        from ..config.connections import ConnectionsStore  # noqa: PLC0415
+
+        raw_name = (payload.get("name") or "").strip() or "imported.yaml"
+        text = payload.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise HTTPException(status_code=400, detail="文件内容为空")
+
+        # 只取文件名部分，去掉任何目录成分（防止 ../ 之类的路径穿越）
+        safe = Path(raw_name.replace("\\", "/")).name
+        if not safe.lower().endswith((".yaml", ".yml")):
+            safe += ".yaml"
+        target = Path("imports") / safe
+        if target.exists():
+            stem, suffix = target.stem, target.suffix
+            index = 2
+            while (Path("imports") / f"{stem}-{index}{suffix}").exists():
+                index += 1
+            target = Path("imports") / f"{stem}-{index}{suffix}"
+
+        try:
+            clean = state.save_as(str(target), text)
+            ConnectionsStore().set_active_file(clean)
+        except TableSeedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        # 导进来立刻校验，把问题随响应带回去（用户不用再点一次校验）
+        problems: list[str] = []
+        try:
+            problems = service.check(state.parse(state.text))
+        except TableSeedError as exc:
+            problems = [str(exc)]
+        state.log_operation("导入配置", f"{raw_name} → {clean}")
+        return {
+            "ok": True,
+            "path": clean,
+            "text": state.text,
+            "problems": problems,
+            "from": raw_name,
+        }
+
+    @app.post("/api/workspace/import-path")
+    def import_workspace_by_path(payload: dict[str, Any]) -> dict[str, Any]:
+        """按**绝对路径**导入配置（"同事发我文件放在 D:/x/a.yaml" 的场景）。
+
+        与 import 的区别：这里读的是本机任意路径。本工具只监听 127.0.0.1、
+        且必须由用户在界面上主动输入路径，所以读取本机文件是其明确意图。
+        """
+        from ..config.connections import ConnectionsStore  # noqa: PLC0415
+
+        raw = (payload.get("path") or "").strip().strip('"')
+        if not raw:
+            raise HTTPException(status_code=400, detail="请填写文件路径")
+        source = Path(raw).expanduser()
+        if not source.exists():
+            raise HTTPException(status_code=400, detail=f"文件不存在: {raw}")
+        if not source.is_file():
+            raise HTTPException(status_code=400, detail=f"不是文件: {raw}")
+
+        try:
+            clean = state.import_path(str(source))
+            ConnectionsStore().set_active_file(clean)
+        except TableSeedError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        problems: list[str] = []
+        try:
+            problems = service.check(state.parse(state.text))
+        except TableSeedError as exc:
+            problems = [str(exc)]
+        state.log_operation("导入配置", f"按路径 {raw} → {clean}")
+        return {
+            "ok": True,
+            "path": clean,
+            "text": state.text,
+            "problems": problems,
+            "from": raw,
+        }
+
     @app.post("/api/workspace/remove")
     def remove_workspace_file(payload: dict[str, Any]) -> dict[str, Any]:
         """把文件移出清单（不删除磁盘文件）。"""
@@ -622,13 +746,16 @@ def create_app(config_path: str | None = None) -> FastAPI:
         incomplete = set(data["incomplete"])
         connections = {}
         for name, fields in data["connections"].items():
-            # **绝不下发明文密码**：原来 `{**fields}` 把 password 一起回传，
-            # 页面源码 / 开发者工具 / 网络面板 / 截图里都能看到用户真实密码。
-            # 改成只给"是否已配置"标记 —— 前端编辑时密码框留空即表示不修改。
+            # **不下发明文密码**（页面源码/开发者工具/网络面板/截图都会泄露），
+            # 但也不能只给一个布尔标记 —— 密码框一片空白，用户以为没保存，
+            # 每次都要重新输入，甚至输错导致连接真的失败。
+            # 给一个**定长掩码**：看得出"已配置"，又不泄露内容与长度。
             safe = {k: v for k, v in fields.items() if k != "password"}
+            has_pwd = bool(fields.get("password"))
             entry = {
                 **safe,
-                "password_set": bool(fields.get("password")) or bool(fields.get("password_env")),
+                "password_set": has_pwd or bool(fields.get("password_env")),
+                "password_mask": _PASSWORD_MASK if has_pwd else "",
                 "password_env_set": bool(fields.get("password_env")),
                 "complete": name not in incomplete,
             }
@@ -659,9 +786,9 @@ def create_app(config_path: str | None = None) -> FastAPI:
     def put_connection(payload: dict[str, Any]) -> dict[str, Any]:
         """新增/更新一个连接。name 为连接名，其余为连接字段。
 
-        **密码留空 = 不修改**：GET /api/connections 不再下发明文密码，
-        所以前端编辑已有连接时密码框是空的。这里把"空密码"解释成
-        "沿用原密码"，而不是把用户已保存的密码清成空串。
+        **密码留空或等于掩码 = 不修改**：GET /api/connections 只下发定长掩码，
+        前端回填掩码让用户看得出"已配置"。保存时收到掩码（或空串）都沿用原密码，
+        不会把已保存的密码清掉。
         """
         from ..config.connections import ConnectionsStore  # noqa: PLC0415
 
@@ -669,7 +796,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
         fields = {k: v for k, v in payload.items() if k != "name" and v is not None}
 
         store = ConnectionsStore()
-        if not str(fields.get("password") or "").strip():
+        candidate = str(fields.get("password") or "").strip()
+        if not candidate or candidate == _PASSWORD_MASK:
             fields.pop("password", None)
             existing = (store.load()["connections"].get(name or "") or {})
             if existing.get("password"):

@@ -1,0 +1,7 @@
+seed: 20260918
+limits: {max_rows: 5000, strategy: full}
+tables:
+  - name: t_shared_demo
+    groups:
+      - {type: enum, name: g_s, fields: [status], values: [['01'], ['02']]}
+      - {type: const, name: g_note, fields: [note], value: ['来自同事的配置']}

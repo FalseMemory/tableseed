@@ -15,8 +15,8 @@ from ..models import SeedConfig
 log = logging.getLogger("tableseed.config")
 
 
-def load_config(path: str | Path) -> SeedConfig:
-    """从 YAML 文件加载配置。
+def load_config_text_from_file(path: str | Path) -> str:
+    """读配置文件文本，带编码回退。
 
     **编码自动回退**：中文 Windows 上"记事本 → 另存为 ANSI"存出来的 YAML
     是 GBK 编码，直接按 UTF-8 读会抛 UnicodeDecodeError —— 曾经它是**未包装**
@@ -32,9 +32,8 @@ def load_config(path: str | Path) -> SeedConfig:
     except OSError as exc:
         raise ConfigError(f"读取配置文件失败: {exc}") from exc
 
-    text: str | None = None
     try:
-        text = raw_bytes.decode("utf-8")
+        return raw_bytes.decode("utf-8")
     except UnicodeDecodeError:
         try:
             text = raw_bytes.decode("gbk")
@@ -44,11 +43,14 @@ def load_config(path: str | Path) -> SeedConfig:
                 " —— 请用编辑器另存为 UTF-8",
                 str(file_path),
             ) from exc
-        log.warning(
-            "%s 不是 UTF-8 编码，已按 GBK 读取 —— 建议另存为 UTF-8", file_path
-        )
+        log.warning("%s 不是 UTF-8 编码，已按 GBK 读取 —— 建议另存为 UTF-8", file_path)
+        return text
 
-    return load_config_from_text(text, source=str(file_path))
+
+def load_config(path: str | Path) -> SeedConfig:
+    """从 YAML 文件加载配置。"""
+    text = load_config_text_from_file(path)
+    return load_config_from_text(text, source=str(Path(path)))
 
 
 def load_config_from_text(text: str, source: str = "<inline>") -> SeedConfig:

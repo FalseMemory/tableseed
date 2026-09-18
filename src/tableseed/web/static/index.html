@@ -336,10 +336,15 @@
       <span class="chip" id="write-chip">只读查询</span>
     </div>
 
-    <!-- 配置文件工作区：多文件切换 + 另存为 + 从磁盘重载 -->
+    <!-- 配置文件工作区：多文件切换 + 导入外部文件 + 另存为 + 从磁盘重载 -->
     <div class="row" style="padding:8px 16px;border-bottom:1px solid var(--line);flex:none">
       <span class="hint">文件</span>
       <select id="cfg-file-select" style="flex:1;min-width:0"><option value="">— 选择配置文件 —</option></select>
+      <!-- 导入别人发来的 / 下载来的 YAML：浏览器只给文件内容，不给路径，
+           所以先读内容再落到项目内的 imports/（重名自动加序号） -->
+      <input type="file" id="cfg-file-input" accept=".yaml,.yml,.txt" hidden>
+      <button id="btn-cfg-open" title="选择本机的 YAML 文件导入（别人发来的配置走这里）">📂 打开文件</button>
+      <button id="btn-cfg-path" title="按绝对路径导入（如 D:/分享/a.yaml）">按路径导入</button>
       <button id="btn-cfg-reload" title="文件被外部改动（git / 编辑器）后，把磁盘内容重新读进来">⟳ 重载</button>
       <button id="btn-cfg-saveas" title="把当前配置另存为新文件">另存为</button>
       <button id="btn-cfg-remove" title="从清单移除（文件保留）">移除</button>
@@ -371,7 +376,7 @@
           <input type="text" id="db-host" placeholder="地址" value="127.0.0.1">
           <input type="number" id="db-port" placeholder="端口">
           <input type="text" id="db-user" placeholder="用户名">
-          <input type="password" id="db-password" placeholder="密码（留空 = 不修改已保存的）">
+          <input type="text" id="db-password" placeholder="密码" autocomplete="off">
           <input type="text" id="db-name" placeholder="数据库名">
           <input type="text" id="db-password-env" placeholder="密码环境变量名（推荐）">
           <input type="text" id="db-charset" placeholder="字符集 utf8mb4">
@@ -536,6 +541,25 @@
   <textarea id="sqlgen-text" class="sqlbox" spellcheck="false"
     style="height:52vh;font-size:12.5px" placeholder="点击「生成 INSERT 语句」后在这里查看"></textarea>
   <div class="hint" id="sqlgen-hint" style="margin-top:6px"></div>
+</dialog>
+
+<dialog id="import-path-dialog" style="max-width:620px">
+  <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+    <b style="font-size:15px">按路径导入配置</b>
+    <span class="spacer"></span>
+    <button onclick="this.closest('dialog').close()">关闭</button>
+  </div>
+  <div class="hint" style="margin-bottom:10px">
+    填本机上的 YAML 文件绝对路径（如 <code>D:/分享/txn.yaml</code> 或
+    <code>C://Users//me//Desktop//config.yaml</code>）。文件会被复制到项目的
+    <code>imports/</code> 下再载入，原文件不受影响。
+  </div>
+  <input type="text" id="import-path" placeholder="D:/分享/txn.yaml" style="width:100%">
+  <div class="err" id="import-path-error" style="margin-top:8px"></div>
+  <div class="row" style="margin-top:12px">
+    <button class="primary" id="btn-import-path-confirm">导入</button>
+    <span class="hint">导入后会立即校验，问题直接显示出来</span>
+  </div>
 </dialog>
 
 <dialog id="log-dialog" style="max-width:760px">
@@ -1386,6 +1410,61 @@ async function loadWorkspace() {
   } catch (e) { /* 工作区读取失败不打断启动 */ }
 }
 
+// ---- 导入外部 YAML：别人发来的配置从这里进来 ----
+
+async function importConfigByPath(path) {
+  const res = await api("/api/workspace/import-path", {
+    method: "POST",
+    body: JSON.stringify({ path }),
+  });
+  return applyImported(res);
+}
+
+async function applyImported(res) {
+  $("yaml").value = res.text;
+  $("cfg-path").textContent = res.path;
+  await loadWorkspace();
+  $("cfg-file-select").value = res.path;
+  await validate(true);
+  const problems = res.problems || [];
+  setStatus(problems.length
+    ? `已导入 ${res.from}（有 ${problems.length} 条校验提示）`
+    : `已导入 ${res.from}，校验通过`);
+  return res;
+}
+
+async function openConfigFile(file) {
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const res = await api("/api/workspace/import", {
+      method: "POST",
+      body: JSON.stringify({ name: file.name, text }),
+    });
+    await applyImported(res);
+  } catch (e) {
+    setStatus("导入失败：" + e.message);
+  }
+}
+
+function showImportPathDialog() {
+  $("import-path-error").textContent = "";
+  $("import-path-dialog").showModal();
+  $("import-path").focus();
+}
+
+async function doImportByPath() {
+  const path = $("import-path").value.trim();
+  if (!path) { $("import-path").focus(); return; }
+  try {
+    await importConfigByPath(path);
+    $("import-path-dialog").close();
+    $("import-path").value = "";
+  } catch (e) {
+    $("import-path-error").textContent = e.message;
+  }
+}
+
 async function reloadConfigFile() {
   try {
     const res = await api("/api/config/reload", { method: "POST", body: "{}" });
@@ -1633,11 +1712,12 @@ function applyConnection(name) {
   $("db-host").value = conn.host || "";
   $("db-port").value = conn.port || DB_DEFAULT_PORT[conn.type || "mysql"] || "";
   $("db-user").value = conn.user || "";
-  // 不回填明文密码 —— 服务端不下发密码，只给"是否已配置"标记。
-  // 留空保存即保持原密码（服务端对空密码解释为"不修改"）。
-  $("db-password").value = "";
-  $("db-password").placeholder = conn.password_set
-    ? "已配置（留空表示不修改）"
+  // 回填**定长掩码**而不是明文：看得出"已保存"，又不泄露密码内容与长度。
+  // 保存时原样回传掩码 → 服务端视为"不修改"；想改就全选删掉再输新的。
+  $("db-password").value = conn.password_mask || "";
+  $("db-password").placeholder = conn.password_set ? "" : "密码";
+  $("db-password").title = conn.password_set
+    ? "已保存（要修改请全选删除后输入新密码）"
     : "密码";
   $("db-password-env").value = conn.password_env || "";
   $("db-name").value = conn.database || "";
@@ -1920,6 +2000,16 @@ on("btn-logs-clear", "click", async () => {
 });
 
 // 配置文件工作区
+on("btn-cfg-open", "click", () => $("cfg-file-input").click());
+on("cfg-file-input", "change", (e) => {
+  const file = e.target.files && e.target.files[0];
+  // 清空 value，这样连续导入同一个文件也会再次触发 change
+  e.target.value = "";
+  openConfigFile(file);
+});
+on("btn-cfg-path", "click", showImportPathDialog);
+on("btn-import-path-confirm", "click", doImportByPath);
+on("import-path", "keydown", (e) => { if (e.key === "Enter") doImportByPath(); });
 on("btn-cfg-reload", "click", reloadConfigFile);
 on("btn-cfg-saveas", "click", showSaveAsDialog);
 on("btn-cfg-remove", "click", removeConfigFile);
