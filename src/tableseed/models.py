@@ -209,7 +209,10 @@ class LimitsSpec(_Model):
     max_rows: int = 100_000
     total_rows: int = 100_000
     strategy: Strategy = "full"
-    sample_size: int | None = None
+    #: 抽样行数（strategy=sample 时必填）。必须 ≥ 1 ——
+    #: 写 0 / 负数曾被静默接受，生成出 0 行却没有任何提示，
+    #: 用户看到"生成成功但一行都没有"完全无从判断。
+    sample_size: int | None = Field(default=None, ge=1)
     exclude: list[str] = Field(default_factory=list)
 
 

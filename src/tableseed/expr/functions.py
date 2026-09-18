@@ -138,6 +138,11 @@ def build_functions(
         "isnull": lambda a: a is None,
         # ---- 数值 ----
         "abs": abs,
+        #: 字符串数字转数值 —— enum / const 组的值都是字符串（"100"），
+        #: 拿它们做算术会报"类型不匹配"。SQL 里有隐式转换，这里刻意保持严格
+        #: （早暴露类型问题），所以给一个显式转换函数：
+        #: `cast_num(amount) * 0.1`
+        "cast_num": lambda x: _to_num(x),
         "round": lambda x, n=0: builtins.round(_to_num(x), int(n)),
         "ceil": lambda x: int(math.ceil(_to_num(x))),
         "floor": lambda x: int(math.floor(_to_num(x))),
@@ -195,6 +200,10 @@ def build_functions(
         "curdate": funcs["today"],
         "timestampdiff": lambda unit, a, b: _timestampdiff(unit, a, b),
         "if": funcs["if_"],
+        # 数值转换的 SQL 风格别名
+        "to_number": funcs["cast_num"],
+        "cast_decimal": funcs["cast_num"],
+        "numeric": funcs["cast_num"],
     }
     funcs.update(aliases)
     return funcs

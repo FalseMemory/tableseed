@@ -156,7 +156,26 @@ await mod("2 数据库连接区", async () => { await loadDatabase(); }, ["db-st
 await mod("3 配置文件工作区", async () => { await loadWorkspace(); }, ["cfg-file-select"]);
 await mod("4 规模预演", async () => { await runPlan(); }, ["tab-plan"]);
 await mod("5 关系图", async () => { await runGraph(); }, ["tab-graph"]);
-await mod("6 结构化配置编辑器", async () => { await loadEditor(); }, ["editor-body"]);
+await mod("6 结构化配置编辑器", async () => {
+  await loadEditor();
+  // 断言真的渲染出编辑器行（含"加一组"按钮与组行），
+  // 不能只看 innerHTML 非空 —— 早退时写的是"配置里还没有表"，那也是非空
+  const html = String(store["editor-body"].innerHTML || "");
+  for (const token of ["ed-add-group", "ed-name", "ed-type", "ed-del"]) {
+    if (!html.includes(token)) throw new Error("编辑器没渲染出 " + token);
+  }
+}, []);
+await mod("6b 编辑器交互：加一组 / 改组名", async () => {
+  // 断言交互真的改到了数据模型 —— 只测"渲染出来"不够，
+  // 元素存在但事件没绑上照样是坏的
+  const before = editState.view.tables[0].groups.length;
+  const addBtn = store["ed-add-group"];
+  if (!addBtn || !addBtn._h || !addBtn._h.click) throw new Error("「加一组」按钮没绑事件");
+  addBtn._h.click();
+  const after = editState.view.tables[0].groups.length;
+  if (after !== before + 1) throw new Error(`加一组没生效: ${before} → ${after}`);
+}, []);
+
 await mod("7 生成配置（DDL/INSERT）", async () => { await runImport(); }, ["imp-out"]);
 await mod("8 生成数据与结果预览", async () => {
   renderResult(RESP.generate);
@@ -292,18 +311,84 @@ function makeEl(id) {{
     addEventListener(ev, fn) {{ this._h[ev] = fn; }},
     removeEventListener() {{}}, appendChild() {{}}, remove() {{}},
     focus() {{}}, blur() {{}}, select() {{}}, close() {{}}, showModal() {{}},
-    closest() {{ return null; }}, querySelector() {{ return null; }},
+    closest() {{ return null; }},
+    // 返回**可用元素**而不是 null：真实浏览器里 renderEditor 刚写完 innerHTML，
+    // 选择器一定能取到元素。桩返回 null 会让绑定代码抛错、又被 catch 吞掉，
+    // 断言"innerHTML 非空"就假阳性通过了。
+    querySelector() {{ return makeEl("_q"); }},
     querySelectorAll() {{ return []; }}, dispatchEvent() {{}},
     setAttribute() {{}}, getAttribute() {{ return null; }}, scrollIntoView() {{}},
     classList: {{ add() {{}}, remove() {{}}, contains() {{ return false; }} }},
   }};
 }}
 const store = {{}};
+// ---- 迷你 DOM：把 innerHTML 里带 id / class / data-* 的元素注册进 store ----
+// 没有这一步就测不了交互：页面用 innerHTML 渲染出来的按钮（如"加一组"），
+// querySelector 找不到，事件绑不上，测试却以为"渲染出来了 = 能用"。
+const index = {{ byClass: {{}}, all: [] }};
+function register(html) {{
+  const tagRe = /<(\w+)([^>]*)>/g;
+  let m;
+  while ((m = tagRe.exec(html)) !== null) {{
+    const attrs = m[2] || "";
+    const id = (attrs.match(/id="([\w-]+)"/) || [])[1];
+    const cls = (attrs.match(/class="([^"]*)"/) || [])[1];
+    const el = id ? (store[id] ||= makeEl(id)) : makeEl("_tag");
+    el.tagName = m[1].toUpperCase();
+    if (cls) {{
+      el.className = cls;
+      cls.split(/\s+/).filter(Boolean).forEach((c) => {{
+        (index.byClass[c] ||= []).push(el);
+      }});
+      el.classList = {{
+        add: (c) => {{ el.className += " " + c; (index.byClass[c] ||= []).push(el); }},
+        remove: () => {{}}, contains: (c) => el.className.includes(c),
+      }};
+    }}
+    // data-* 属性（选择器里的 [data-gi="0"] 要用）
+    const dataRe = /data-([\w-]+)="([^"]*)"/g;
+    let d;
+    while ((d = dataRe.exec(attrs)) !== null) {{
+      el.dataset[d[1].replace(/-(\w)/g, (_, c) => c.toUpperCase())] = d[2];
+    }}
+    const value = (attrs.match(/value="([^"]*)"/) || [])[1];
+    if (value !== undefined) el.value = value.replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+    index.all.push(el);
+  }}
+  return html;
+}}
+function makeElWithHtml(id) {{
+  const el = makeEl(id);
+  Object.defineProperty(el, "innerHTML", {{
+    get() {{ return el._html || ""; }},
+    set(v) {{ el._html = String(v); register(el._html); }},
+    configurable: true,
+  }});
+  return el;
+}}
 global.document = {{
-  getElementById: (id) => (store[id] ||= makeEl(id)),
-  createElement: (tag) => makeEl("_" + tag),
-  querySelector: () => null, querySelectorAll: () => [],
-  addEventListener: () => {{}}, body: makeEl("body"), head: makeEl("head"),
+  getElementById: (id) => (store[id] ||= makeElWithHtml(id)),
+  createElement: (tag) => makeElWithHtml("_" + tag),
+  // 支持 #id、.class、.class[data-x="v"]（属性过滤退化为该 class 的第 N 个）
+  querySelector: (sel) => {{
+    if (sel.startsWith("#")) return store[sel.slice(1)] || makeEl("_q");
+    const cls = (sel.match(/^\.([\w-]+)/) || [])[1];
+    const idx = (sel.match(/data-gi="(\d+)"/) || [])[1];
+    const list = index.byClass[cls] || [];
+    if (idx !== undefined) return list[+idx] || makeEl("_q");
+    return list[0] || makeEl("_q");
+  }},
+  querySelectorAll: (sel) => {{
+    const cls = (sel.match(/\.([\w-]+)/) || [])[1];
+    if (cls && index.byClass[cls]) return index.byClass[cls];
+    const idx = (sel.match(/data-gi="(\d+)"/) || [])[1];
+    if (idx !== undefined) {{
+      // `.ed-param[data-gi="0"]` → 该组下的所有参数输入框
+      return index.all.filter((e) => e.dataset && e.dataset.gi === idx);
+    }}
+    return [];
+  }},
+  addEventListener: () => {{}}, body: makeElWithHtml("body"), head: makeElWithHtml("head"),
 }};
 global.window = {{ addEventListener: () => {{}}, location: {{ href: "/" }},
   confirm: () => true, open: () => null }};

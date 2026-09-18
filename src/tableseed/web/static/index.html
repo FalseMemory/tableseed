@@ -969,6 +969,9 @@ function renderEditor() {
   const body = $("editor-body");
   const v = editState.view;
   if (!v || !v.tables.length) { body.innerHTML = '<div class="empty">配置里还没有表。</div>'; return; }
+  // 表数量变少（重新加载 / 切换文件）后下标可能越界 —— 钳回第一张表，
+  // 否则下面 v.tables[tableIndex].groups 会抛 TypeError，整个编辑器白屏
+  if (editState.tableIndex >= v.tables.length) editState.tableIndex = 0;
 
   const names = v.tables.map((t) => t.name);
   const bar = `
@@ -1032,19 +1035,29 @@ function editorRowHtml(g, gi) {
 
 function bindEditor() {
   const v = editState.view, table = v.tables[editState.tableIndex];
-  $("ed-table").addEventListener("change", (e) => { editState.tableIndex = +e.target.value; renderEditor(); });
-  $("ed-add-group").addEventListener("click", () => {
+  // 元素查找统一走这个助手：任一元素缺失时跳过该处绑定，
+  // 而不是 `null.addEventListener` 抛错把后面的绑定全中断
+  // （曾经一个输入框缺失 → 整页编辑器的改动都不生效）
+  // 注意：这里按**选择器**绑定，与全局的 on(id, ...)（按 id）不是一回事，
+  // 所以另起一个名字，免得读代码时混淆
+  const bindSel = (selector, event, handler) => {
+    const el = document.querySelector(selector);
+    if (el) el.addEventListener(event, handler);
+    else console.warn("[tableseed] 缺少元素，跳过绑定:", selector);
+  };
+  bindSel("#ed-table", "change", (e) => { editState.tableIndex = +e.target.value; renderEditor(); });
+  bindSel("#ed-add-group", "click", () => {
     table.groups.push({ type: "enum", name: "g_new", fields: [], values: [] });
     renderEditor();
   });
   table.groups.forEach((g, gi) => {
-    document.querySelector(`.ed-name[data-gi="${gi}"]`).addEventListener("change", (e) => { g.name = e.target.value.trim(); });
-    document.querySelector(`.ed-type[data-gi="${gi}"]`).addEventListener("change", (e) => {
+    bindSel(`.ed-name[data-gi="${gi}"]`, "change", (e) => { g.name = e.target.value.trim(); });
+    bindSel(`.ed-type[data-gi="${gi}"]`, "change", (e) => {
       g.type = e.target.value;
       GROUP_KEYS[g.type].forEach((k) => { if (g[k] === undefined) g[k] = k === "values" ? [] : ""; });
       renderEditor();
     });
-    document.querySelector(`.ed-fields[data-gi="${gi}"]`).addEventListener("change", (e) => {
+    bindSel(`.ed-fields[data-gi="${gi}"]`, "change", (e) => {
       g.fields = e.target.value.split(",").map((s) => s.trim()).filter(Boolean);
     });
     document.querySelectorAll(`.ed-param[data-gi="${gi}"]`).forEach((input) => {
@@ -1056,7 +1069,7 @@ function bindEditor() {
         input.title = "解析为：" + JSON.stringify(g[key]);
       });
     });
-    document.querySelector(`.ed-del[data-gi="${gi}"]`).addEventListener("click", () => {
+    bindSel(`.ed-del[data-gi="${gi}"]`, "click", () => {
       table.groups.splice(gi, 1);
       renderEditor();
     });

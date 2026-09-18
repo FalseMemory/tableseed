@@ -159,7 +159,21 @@ class Evaluator:
             if isinstance(op, ast.Pow):
                 return left**right
         except TypeError as exc:
-            raise ExprError(f"类型不匹配: {left!r} 与 {right!r}") from exc
+            # 给出**可操作**的提示：最常见的原因是字段值是字符串（enum/const
+            # 组里的 "100"），而表达式拿它做算术。
+            hint = ""
+            for value in (left, right):
+                if isinstance(value, str):
+                    try:
+                        Decimal(value)
+                    except (InvalidOperation, ValueError):
+                        continue
+                    hint = (
+                        f"（{value!r} 是字符串 —— 需要算术时请把该字段的取值改成数值，"
+                        "或用 cast_num(字段名) 转换）"
+                    )
+                    break
+            raise ExprError(f"类型不匹配: {left!r} 与 {right!r}{hint}") from exc
         except ZeroDivisionError as exc:
             # 除零 / 取模零：必须包成可读错误，
             # 否则 ZeroDivisionError 会一路逃到 Web 层变成 500 内部错误
