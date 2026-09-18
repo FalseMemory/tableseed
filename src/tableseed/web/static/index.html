@@ -1750,7 +1750,8 @@ async function runSql() {
   }
 }
 
-function renderSqlResult(res, out) {
+function renderSqlResult(res, out = $("sql-out")) {
+  // out 缺省取 #sql-out：漏传参数时不该抛 "undefined.innerHTML"
   const insertBtn = `<button id="btn-sql-insert">由查询结果生成 INSERT（前 10 行）</button>`;
   const info = `<div class="msg ok">返回 ${res.row_count} 行，耗时 ${res.elapsed_ms} ms${res.truncated ? "（已截断）" : ""} ${insertBtn}</div>`;
   const pages = Math.max(1, Math.ceil(lastQuery.rows.length / SQL_PAGE_SIZE));

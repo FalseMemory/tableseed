@@ -197,6 +197,29 @@ await mod("11 SQL 台", async () => {
 await mod("12 操作日志", async () => { await loadLogs(); }, ["logs-body"]);
 await mod("13 帮助弹窗", async () => { showEditorHelp(); }, []);
 
+await mod("14 tab 切换（7 个页签都能激活）", async () => {
+  for (const tab of ["plan", "graph", "result", "editor", "import", "sql", "logs"]) {
+    switchTab(tab);
+  }
+}, []);
+
+await mod("15 日志筛选与分页参数", async () => {
+  store["logs-kind"].value = "生成";
+  store["logs-ok"].value = "true";
+  store["logs-q"].value = "t_txn";
+  const before = fetched.length;
+  await loadLogs();
+  if (fetched.length <= before) throw new Error("筛选没有发起请求");
+}, ["logs-body"]);
+
+await mod("16 SQL 结果分页渲染", async () => {
+  // 先让 lastQuery 有数据（分页逻辑依赖它），再渲染
+  store["sql"].value = "SELECT 1";
+  await runSql();
+  const html = String(store["sql-out"].innerHTML || "");
+  if (!html.includes("<table")) throw new Error("SQL 结果没渲染出表格");
+}, ["sql-out"]);
+
 // 错误横幅检查（window error 监听会往这写）
 const errBar = store["err-bar"];
 if (errBar && String(errBar.textContent || "").includes("前端脚本错误")) {
